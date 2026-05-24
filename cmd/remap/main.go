@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"go-tmdb-episodes-fix/pkg/remap"
+	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/remap"
 )
 
 func main() {
@@ -124,4 +124,3 @@ func exitErr(msg string) {
 	fmt.Fprintln(os.Stderr, msg)
 	os.Exit(1)
 }
-

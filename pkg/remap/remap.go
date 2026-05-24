@@ -8,8 +8,8 @@ import (
 	"strings"
 	"unicode"
 
-	"go-tmdb-episodes-fix/pkg/tmdb"
-	"go-tmdb-episodes-fix/pkg/tvdb"
+	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/tmdb"
+	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/tvdb"
 )
 
 type Options struct {
@@ -353,4 +353,3 @@ func findRemoteNumericID(ids []tvdb.RemoteID, hints []string) int {
 	}
 	return 0
 }
-
