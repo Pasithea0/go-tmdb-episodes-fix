@@ -195,3 +195,53 @@ func (c *Client) GetSeasonEpisodes(ctx context.Context, tvID int, season int) ([
 	return out, nil
 }
 
+// ---------- TV search ----------
+
+// TVSearchResult is a lightweight TV series result from TMDB search.
+type TVSearchResult struct {
+	ID               int    `json:"id"`
+	Name             string `json:"name"`
+	FirstAirDate     string `json:"first_air_date"`
+	NumberOfEpisodes int    `json:"number_of_episodes"`
+	NumberOfSeasons  int    `json:"number_of_seasons"`
+}
+
+// SearchTV searches TMDB for TV series by title.
+func (c *Client) SearchTV(ctx context.Context, query string, page int) ([]TVSearchResult, error) {
+	q := url.Values{}
+	q.Set("query", query)
+	q.Set("page", strconv.Itoa(page))
+
+	var resp struct {
+		Results []TVSearchResult `json:"results"`
+	}
+	if err := c.doGet(ctx, "/search/tv", q, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
+}
+
+// ---------- Movie search ----------
+
+// MovieSearchResult is a lightweight movie result from TMDB search.
+type MovieSearchResult struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	ReleaseDate string `json:"release_date"`
+}
+
+// SearchMovie searches TMDB for movies by title.
+func (c *Client) SearchMovie(ctx context.Context, query string, page int) ([]MovieSearchResult, error) {
+	q := url.Values{}
+	q.Set("query", query)
+	q.Set("page", strconv.Itoa(page))
+
+	var resp struct {
+		Results []MovieSearchResult `json:"results"`
+	}
+	if err := c.doGet(ctx, "/search/movie", q, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
+}
+

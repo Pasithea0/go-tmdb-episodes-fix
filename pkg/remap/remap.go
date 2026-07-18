@@ -4,26 +4,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
 
+	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/anilist"
 	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/tmdb"
 	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/tvdb"
 )
 
 type Options struct {
-	TVDBAPIKey       string
-	TVDBPIN          string
-	TMDBBearerToken  string
-	TVDBSeasonType   string
-	MaxTVDBPageScan  int
+	TVDBAPIKey        string
+	TVDBPIN           string
+	TMDBBearerToken   string
+	TVDBSeasonType    string
+	MaxTVDBPageScan   int
 	MaxTMDBSeasonScan int
+	// EnableAnilist controls whether AniList resolution is active (default: true).
+	// AniList does not require an API key, but you may wish to disable it for testing.
+	EnableAnilist bool
 }
 
 type Mapper struct {
-	tvdb          *tvdb.Client
-	tmdb          *tmdb.Client
+	tvdb           *tvdb.Client
+	tmdb           *tmdb.Client
+	anilist        *anilist.Client
 	tvdbSeasonType string
 	maxTVDBPages   int
 	maxTMDBSeasons int
@@ -50,9 +56,17 @@ func NewMapper(opts Options) *Mapper {
 		tmdbClient = tmdb.NewClient(opts.TMDBBearerToken)
 	}
 
+	var anilistClient *anilist.Client
+	if !opts.EnableAnilist {
+		// disabled via options; leave nil
+	} else {
+		anilistClient = anilist.NewClient()
+	}
+
 	return &Mapper{
 		tvdb:           tvdb.NewClient(opts.TVDBAPIKey, opts.TVDBPIN),
 		tmdb:           tmdbClient,
+		anilist:        anilistClient,
 		tvdbSeasonType: seasonType,
 		maxTVDBPages:   maxPages,
 		maxTMDBSeasons: maxSeasons,
@@ -298,6 +312,225 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 	}
 
 	return nil, fmt.Errorf("unable to map tvdb %d s%de%d to tmdb", tvdbSeriesID, season, episode)
+}
+
+// ---------- Provider resolution results ----------
+
+// ProviderIDs holds cross-referenced provider IDs for a single media item.
+// Only non-nil fields were successfully resolved.
+type ProviderIDs struct {
+	TMDB    *int    `json:"tmdb_id,omitempty"`
+	TVDB    *int    `json:"tvdb_id,omitempty"`
+	IMDb    *string `json:"imdb_id,omitempty"`
+	AniList *int    `json:"anilist_id,omitempty"`
+	// AniListTitle is the resolved title from AniList (set even when no TMDB/TVDB found).
+	AniListTitle string `json:"anilist_title,omitempty"`
+	// AniListFormat is the format from AniList ("TV", "MOVIE", "OVA", etc.).
+	AniListFormat string `json:"anilist_format,omitempty"`
+	MatchedBy     string `json:"matched_by"` // how the TMDB ID was resolved
+}
+
+// ResolveAnilistToProviders takes an AniList ID and attempts to find
+// equivalent provider IDs (TMDB, TVDB, IMDb) using AniList's external links
+// and title-based fallback search.
+func (m *Mapper) ResolveAnilistToProviders(ctx context.Context, anilistID int) (*ProviderIDs, error) {
+	if m.anilist == nil {
+		return nil, errors.New("anilist client not initialised (EnableAnilist=false)")
+	}
+
+	media, err := m.anilist.GetMedia(ctx, anilistID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch anilist media %d: %w", anilistID, err)
+	}
+	if media == nil {
+		return nil, fmt.Errorf("anilist media %d not found", anilistID)
+	}
+
+	result := &ProviderIDs{
+		AniList:       &anilistID,
+		AniListTitle:  pickTitle(media.Title),
+		AniListFormat: media.Format,
+	}
+
+	// Strategy A: Parse external links for TMDB and Crunchyroll/streaming URLs.
+	// AniList often includes "TVDB" and "Crunchyroll" in externalLinks but rarely
+	// includes TMDB directly. TVDB is more common, so we check for both.
+	var crunchyrollURL string
+	for _, link := range media.ExternalLinks {
+		site := strings.ToLower(strings.TrimSpace(link.Site))
+		switch {
+		case strings.Contains(site, "themoviedb") || strings.Contains(site, "tmdb"):
+			if id := extractNumericIDFromURL(link.URL); id > 0 {
+				v := id
+				result.TMDB = &v
+				result.MatchedBy = "anilist_external_link_tmdb"
+			}
+		case strings.Contains(site, "thetvdb") || strings.Contains(site, "tvdb"):
+			if id := extractNumericIDFromURL(link.URL); id > 0 {
+				v := id
+				result.TVDB = &v
+				if result.MatchedBy == "" {
+					result.MatchedBy = "anilist_external_link_tvdb"
+				}
+			}
+		case strings.Contains(site, "imdb") || strings.Contains(site, "imdb"):
+			if id := extractIMDbIDFromURL(link.URL); id != "" {
+				result.IMDb = &id
+			}
+		case strings.Contains(site, "crunchyroll"):
+			crunchyrollURL = link.URL
+		}
+	}
+
+	// Strategy B: If we found TMDB, also resolve TVDB using the existing mapper.
+	if result.TMDB != nil && m.tvdb != nil {
+		series, lookupUsed, err := m.tvdb.FindSeriesByTMDBID(ctx, *result.TMDB)
+		if err == nil && series != nil {
+			result.TVDB = &series.ID
+			if result.MatchedBy == "anilist_external_link_tmdb" {
+				result.MatchedBy = "anilist_external_link_tmdb+tvdb"
+			}
+			_ = lookupUsed
+		}
+	}
+
+	// Strategy C: If we found TMDB but have an AniList-only ID, resolve via
+	// AniList → Crunchyroll URL → TMDB search (future enhancement via external API).
+	_ = crunchyrollURL // placeholder for future Crunchyroll→TMDB reverse lookup
+
+	// Strategy D: Title-based TMDB search fallback (only use when TMDB client is available
+	// and we haven't found a TMDB ID yet).
+	if result.TMDB == nil && m.tmdb != nil {
+		title := pickTitle(media.Title)
+		if title != "" {
+			tmdbID, mediaType := m.searchTMDBByTitle(ctx, title, media.Episodes)
+			if tmdbID > 0 {
+				result.TMDB = &tmdbID
+				result.MatchedBy = "title_search_" + mediaType
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// ResolveAnilistEpisode maps an AniList episode number to TMDB season/episode
+// for the given series. Most anime use a flat episode list (season=1), so this
+// is a simple passthrough unless the item has been manually remapped.
+// Returns (season, episode).
+func (m *Mapper) ResolveAnilistEpisode(anilistEpisode int) (season, episode int) {
+	// Flat model: all episodes are season 1.
+	// Override this when AniList data is linked to a TMDB item with multiple seasons.
+	return 1, anilistEpisode
+}
+
+// ---------- helpers for ProviderIDs ----------
+
+// pickTitle returns the best available title (English > Romaji > Native).
+func pickTitle(t anilist.MediaTitle) string {
+	if t.English != "" {
+		return t.English
+	}
+	if t.Romaji != "" {
+		return t.Romaji
+	}
+	return t.Native
+}
+
+var tmdbURLPattern = regexp.MustCompile(`themoviedb\.org/(?:tv|movie)/(\d+)`)
+
+// extractNumericIDFromURL attempts to extract a numeric ID from common URL patterns.
+func extractNumericIDFromURL(rawURL string) int {
+	// Try TMDB URL pattern first
+	if matches := tmdbURLPattern.FindStringSubmatch(rawURL); len(matches) >= 2 {
+		if n, err := strconv.Atoi(matches[1]); err == nil {
+			return n
+		}
+	}
+	// Fallback: try to find any trailing number
+	rawURL = strings.TrimRight(rawURL, "/")
+	parts := strings.Split(rawURL, "/")
+	if len(parts) > 0 {
+		last := parts[len(parts)-1]
+		if n, err := strconv.Atoi(last); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// extractIMDbIDFromURL pulls an IMDb ID (tt1234567) from a URL path.
+func extractIMDbIDFromURL(rawURL string) string {
+	rawURL = strings.TrimRight(rawURL, "/")
+	parts := strings.Split(rawURL, "/")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "tt") && len(part) >= 9 {
+			// Verify trailing digits
+			allDigits := true
+			for _, r := range part[2:] {
+				if r < '0' || r > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if allDigits {
+				return part
+			}
+		}
+	}
+	return ""
+}
+
+// searchTMDBByTitle searches TMDB by title and returns the best-matching series or movie ID.
+// Returns (0, "") if no match is found or the TMDB client is unavailable.
+func (m *Mapper) searchTMDBByTitle(ctx context.Context, title string, expectedEpisodes *int) (int, string) {
+	if m.tmdb == nil || title == "" {
+		return 0, ""
+	}
+
+	// Search both TV and movie endpoints
+	type searchResult struct {
+		id          int
+		mediaType   string
+		episodeDiff int // how many episodes off from expected
+	}
+
+	var best searchResult
+
+	// TV search
+	if tvShows, err := m.tmdb.SearchTV(ctx, title, 1); err == nil {
+		for _, show := range tvShows {
+			if normalizeName(show.Name) == normalizeName(title) {
+				diff := 0
+				if expectedEpisodes != nil {
+					if show.NumberOfEpisodes > 0 {
+						d := *expectedEpisodes - show.NumberOfEpisodes
+						if d < 0 {
+							d = -d
+						}
+						diff = d
+					}
+				}
+				if best.id == 0 || diff < best.episodeDiff {
+					best = searchResult{id: show.ID, mediaType: "tv", episodeDiff: diff}
+				}
+			}
+		}
+	}
+
+	// Movie search
+	if movies, err := m.tmdb.SearchMovie(ctx, title, 1); err == nil {
+		for _, movie := range movies {
+			if normalizeName(movie.Title) == normalizeName(title) {
+				if best.id == 0 {
+					best = searchResult{id: movie.ID, mediaType: "movie", episodeDiff: 0}
+				}
+			}
+		}
+	}
+
+	return best.id, best.mediaType
 }
 
 func pickBestByName(eps []tvdb.EpisodeBaseRecord, wantName string) *tvdb.EpisodeBaseRecord {
