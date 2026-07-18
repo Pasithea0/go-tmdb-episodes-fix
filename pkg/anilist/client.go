@@ -52,8 +52,10 @@ type ExternalLink struct {
 
 // AiringSchedule represents a single airing event.
 type AiringSchedule struct {
-	Episode  int   `json:"episode"`
-	AiringAt int64 `json:"airingAt"`
+	ID        int    `json:"id"`
+	Episode   int    `json:"episode"`
+	AiringAt  int64  `json:"airingAt"`  // Unix timestamp
+	AirDate   string // computed from AiringAt
 }
 
 // MediaResult is the top-level media object returned by AniList.
@@ -71,7 +73,16 @@ type MediaResult struct {
 	Format            string           `json:"format"` // TV, MOVIE, OVA, ONA, SPECIAL, MUSIC
 	Genres            []string         `json:"genres"`
 	ExternalLinks     []ExternalLink   `json:"externalLinks"`
-	NextAiringEpisode *AiringSchedule  `json:"nextAiringEpisode"`
+	NextAiringEpisode *struct {
+		Episode  int   `json:"episode"`
+		AiringAt int64 `json:"airingAt"`
+	} `json:"nextAiringEpisode"`
+}
+
+// MediaAiringSchedule holds a single aired episode from AniList.
+type MediaAiringSchedule struct {
+	Episode  int   `json:"episode"`
+	AiringAt int64 `json:"airingAt"`
 }
 
 // MediaSearchResult is a lighter result used for search.
@@ -224,6 +235,39 @@ func (c *Client) GetMediaByExternalURL(ctx context.Context, url string) (*MediaR
 	}
 
 	return wrapper.Media, nil
+}
+
+// GetAiringSchedule fetches the airing schedule (air dates) for an anime.
+func (c *Client) GetAiringSchedule(ctx context.Context, anilistID int) ([]MediaAiringSchedule, error) {
+	const scheduleQuery = `
+	query ($id: Int, $page: Int) {
+		Page(page: $page, perPage: 50) {
+			airingSchedules(mediaId: $id, notYetAired: false, sort: EPISODE) {
+				episode
+				airingAt
+			}
+		}
+	}`
+	var allSched []MediaAiringSchedule
+	for page := 1; page <= 3; page++ {
+		raw, err := c.doGraphQL(ctx, scheduleQuery, map[string]interface{}{"id": anilistID, "page": page})
+		if err != nil {
+			return allSched, nil // return what we have
+		}
+		var wrapper struct {
+			Page struct {
+				Schedules []MediaAiringSchedule `json:"airingSchedules"`
+			} `json:"Page"`
+		}
+		if err := json.Unmarshal(raw, &wrapper); err != nil {
+			return allSched, nil
+		}
+		if len(wrapper.Page.Schedules) == 0 {
+			break
+		}
+		allSched = append(allSched, wrapper.Page.Schedules...)
+	}
+	return allSched, nil
 }
 
 // ---------- internals ----------
