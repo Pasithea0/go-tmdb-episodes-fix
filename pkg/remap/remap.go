@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/anilist"
@@ -414,14 +415,124 @@ func (m *Mapper) ResolveAnilistToProviders(ctx context.Context, anilistID int) (
 	return result, nil
 }
 
+// EpisodeMatchResult holds the result of resolving an AniList episode to TMDB.
+type EpisodeMatchResult struct {
+	AnilistEpisode  int    `json:"anilist_episode"`
+	AnilistAirDate  string `json:"anilist_air_date,omitempty"`
+	AnilistTitle    string `json:"anilist_title,omitempty"`
+	TMDBSeason      int    `json:"tmdb_season,omitempty"`
+	TMDBEpisode     int    `json:"tmdb_episode,omitempty"`
+	MatchedBy       string `json:"matched_by"` // "air_date", "title", "flat"
+}
+
+// unixToDate converts a Unix timestamp to YYYY-MM-DD string (UTC).
+func unixToDate(ts int64) string {
+	return time.Unix(ts, 0).UTC().Format("2006-01-02")
+}
+
 // ResolveAnilistEpisode maps an AniList episode number to TMDB season/episode
-// for the given series. Most anime use a flat episode list (season=1), so this
-// is a simple passthrough unless the item has been manually remapped.
-// Returns (season, episode).
-func (m *Mapper) ResolveAnilistEpisode(anilistEpisode int) (season, episode int) {
-	// Flat model: all episodes are season 1.
-	// Override this when AniList data is linked to a TMDB item with multiple seasons.
-	return 1, anilistEpisode
+// using air date and episode title matching.
+//
+// Strategy:
+//  1. Fetch AniList airing schedule to get the episode's air date
+//  2. If tmdbID is provided, search TMDB seasons/episodes by air date
+//  3. Fallback: search TMDB by normalized episode title
+//  4. Ultimate fallback: flat model (season=1, episode=anilistEpisode)
+//
+// When tmdbID is nil, returns flat mapping (no cross-provider matching possible).
+func (m *Mapper) ResolveAnilistEpisode(ctx context.Context, anilistID int, anilistEpisode int, tmdbID *int) (*EpisodeMatchResult, error) {
+	result := &EpisodeMatchResult{
+		AnilistEpisode: anilistEpisode,
+		TMDBSeason:     1,
+		TMDBEpisode:    anilistEpisode,
+		MatchedBy:      "flat",
+	}
+
+	// Get airing schedule to find the air date for this episode
+	schedule, err := m.anilist.GetAiringSchedule(ctx, anilistID)
+	if err != nil {
+		// Non-fatal: return flat mapping
+		return result, nil
+	}
+
+	var airDate string
+	for _, s := range schedule {
+		if s.Episode == anilistEpisode {
+			airDate = unixToDate(s.AiringAt)
+			result.AnilistAirDate = airDate
+			break
+		}
+	}
+
+	// If we want to match by title, fetch the media to get episode titles
+	// AniList doesn't expose per-episode titles via GraphQL directly,
+	// but we can get the show-level title as a fallback name.
+	if m.anilist != nil {
+		media, _ := m.anilist.GetMedia(ctx, anilistID)
+		if media != nil {
+			result.AnilistTitle = pickTitle(media.Title)
+		}
+	}
+
+	// If no TMDB ID available, return flat mapping
+	if tmdbID == nil || *tmdbID == 0 || m.tmdb == nil {
+		return result, nil
+	}
+
+	// Strategy: air date matching across all TMDB seasons
+	if airDate != "" {
+		tvDetails, err := m.tmdb.GetTVDetails(ctx, *tmdbID)
+		if err == nil && tvDetails.NumberOfSeasons > 0 {
+			limit := tvDetails.NumberOfSeasons
+			if limit > m.maxTMDBSeasons {
+				limit = m.maxTMDBSeasons
+			}
+			for seasonNum := 1; seasonNum <= limit; seasonNum++ {
+				episodes, err := m.tmdb.GetSeasonEpisodes(ctx, *tmdbID, seasonNum)
+				if err != nil {
+					continue
+				}
+				for _, ep := range episodes {
+					if strings.TrimSpace(ep.AirDate) == airDate {
+						result.TMDBSeason = seasonNum
+						result.TMDBEpisode = ep.EpisodeNumber
+						result.MatchedBy = "air_date"
+						return result, nil
+					}
+				}
+			}
+		}
+	}
+
+	// Strategy fallback: title matching across all TMDB seasons
+	if result.AnilistTitle != "" {
+		want := normalizeName(result.AnilistTitle)
+		if want != "" {
+			tvDetails, err := m.tmdb.GetTVDetails(ctx, *tmdbID)
+			if err == nil && tvDetails.NumberOfSeasons > 0 {
+				limit := tvDetails.NumberOfSeasons
+				if limit > m.maxTMDBSeasons {
+					limit = m.maxTMDBSeasons
+				}
+				for seasonNum := 1; seasonNum <= limit; seasonNum++ {
+					episodes, err := m.tmdb.GetSeasonEpisodes(ctx, *tmdbID, seasonNum)
+					if err != nil {
+						continue
+					}
+					for _, ep := range episodes {
+						if normalizeName(ep.Name) == want {
+							result.TMDBSeason = seasonNum
+							result.TMDBEpisode = ep.EpisodeNumber
+							result.MatchedBy = "title"
+							return result, nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return result, nil
 }
 
 // ---------- helpers for ProviderIDs ----------
