@@ -20,6 +20,7 @@ type Options struct {
 	TVDBPIN           string
 	TMDBBearerToken   string
 	TVDBSeasonType    string
+	FallbackSeasonTypes []string
 	MaxTVDBPageScan   int
 	MaxTMDBSeasonScan int
 	// EnableAnilist controls whether AniList resolution is active (default: true).
@@ -27,13 +28,18 @@ type Options struct {
 	EnableAnilist bool
 }
 
+// defaultFallbackSeasonTypes is the ordered list of season types to try
+// when the primary season type returns no episodes.
+var defaultFallbackSeasonTypes = []string{"official", "dvd", "alternate", "regional"}
+
 type Mapper struct {
-	tvdb           *tvdb.Client
-	tmdb           *tmdb.Client
-	anilist        *anilist.Client
-	tvdbSeasonType string
-	maxTVDBPages   int
-	maxTMDBSeasons int
+	tvdb                *tvdb.Client
+	tmdb                *tmdb.Client
+	anilist             *anilist.Client
+	tvdbSeasonType      string
+	fallbackSeasonTypes []string
+	maxTVDBPages        int
+	maxTMDBSeasons      int
 }
 
 func NewMapper(opts Options) *Mapper {
@@ -64,13 +70,19 @@ func NewMapper(opts Options) *Mapper {
 		anilistClient = anilist.NewClient()
 	}
 
+	fallbacks := opts.FallbackSeasonTypes
+	if len(fallbacks) == 0 {
+		fallbacks = defaultFallbackSeasonTypes
+	}
+
 	return &Mapper{
-		tvdb:           tvdb.NewClient(opts.TVDBAPIKey, opts.TVDBPIN),
-		tmdb:           tmdbClient,
-		anilist:        anilistClient,
-		tvdbSeasonType: seasonType,
-		maxTVDBPages:   maxPages,
-		maxTMDBSeasons: maxSeasons,
+		tvdb:                tvdb.NewClient(opts.TVDBAPIKey, opts.TVDBPIN),
+		tmdb:                tmdbClient,
+		anilist:             anilistClient,
+		tvdbSeasonType:      seasonType,
+		fallbackSeasonTypes: fallbacks,
+		maxTVDBPages:        maxPages,
+		maxTMDBSeasons:      maxSeasons,
 	}
 }
 
@@ -221,7 +233,22 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 		return nil, err
 	}
 	if len(eps) == 0 {
-		return nil, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d", tvdbSeriesID, season, episode)
+		for _, fallbackType := range m.fallbackSeasonTypes {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			fallbackEps, fallbackErr := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeriesID, fallbackType, 0, &s, &e, nil)
+			if fallbackErr != nil {
+				continue
+			}
+			if len(fallbackEps) > 0 {
+				eps = fallbackEps
+				break
+			}
+		}
+		if len(eps) == 0 {
+			return nil, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d (tried season types: %s)", tvdbSeriesID, season, episode, m.seasonTypesTried())
+		}
 	}
 
 	tvdbEp := eps[0]
@@ -682,6 +709,12 @@ func normalizeName(s string) string {
 		}
 	}
 	return b.String()
+}
+
+func (m *Mapper) seasonTypesTried() string {
+	types := []string{m.tvdbSeasonType}
+	types = append(types, m.fallbackSeasonTypes...)
+	return strings.Join(types, ", ")
 }
 
 func findRemoteNumericID(ids []tvdb.RemoteID, hints []string) int {
