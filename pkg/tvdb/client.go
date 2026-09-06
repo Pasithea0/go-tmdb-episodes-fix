@@ -131,6 +131,9 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 		if len(msg) > 1500 {
 			msg = msg[:1500]
 		}
+		if res.StatusCode == http.StatusNotFound {
+			return &NotFoundError{Method: method, Path: path, Body: msg}
+		}
 		return fmt.Errorf("tvdb %s %s: status=%d body=%s", method, path, res.StatusCode, msg)
 	}
 
@@ -142,6 +145,25 @@ func (c *Client) do(ctx context.Context, method string, path string, query url.V
 		return fmt.Errorf("tvdb %s %s: decode error: %w (body=%s)", method, path, err, string(raw))
 	}
 	return nil
+}
+
+// NotFoundError indicates the requested TVDB resource returned HTTP 404.
+// The mapper treats it as "this season type / episode isn't present under this
+// ordering" so it can fall through to other season types rather than aborting,
+// which is how the season-type fallback is actually exercised (TVDB 404s a
+// series' episodes under "default" when the show only exposes "official"/"dvd").
+type NotFoundError struct {
+	Method string
+	Path   string
+	Body   string
+}
+
+func (e *NotFoundError) Error() string {
+	body := strings.TrimSpace(e.Body)
+	if len(body) > 1500 {
+		body = body[:1500]
+	}
+	return fmt.Sprintf("tvdb %s %s: status=404 body=%s", e.Method, e.Path, body)
 }
 
 type RemoteID struct {

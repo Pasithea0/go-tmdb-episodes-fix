@@ -204,30 +204,13 @@ type TvdbToTmdbResult struct {
 }
 
 func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, episode int) (*TvdbToTmdbResult, error) {
-	s := season
-	e := episode
-	eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeriesID, m.tvdbSeasonType, 0, &s, &e, nil)
+	eps, err := m.fetchEpisodesBySeasonType(ctx, tvdbSeriesID, season, episode)
 	if err != nil {
 		return nil, err
 	}
 	if len(eps) == 0 {
-		for _, fallbackType := range m.fallbackSeasonTypes {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			fallbackEps, fallbackErr := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeriesID, fallbackType, 0, &s, &e, nil)
-			if fallbackErr != nil {
-				continue
-			}
-			if len(fallbackEps) > 0 {
-				eps = fallbackEps
-				break
-			}
-		}
-		if len(eps) == 0 {
-			return nil, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d (tried season types: %s)",
-				tvdbSeriesID, season, episode, m.seasonTypesTried())
-		}
+		return nil, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d (tried season types: %s)",
+			tvdbSeriesID, season, episode, m.seasonTypesTried())
 	}
 
 	tvdbEp := eps[0]
@@ -365,6 +348,44 @@ func (m *Mapper) seasonTypesTried() string {
 	types := []string{m.tvdbSeasonType}
 	types = append(types, m.fallbackSeasonTypes...)
 	return strings.Join(types, ", ")
+}
+
+// fetchEpisodesBySeasonType returns the episodes for a series/season/episode
+// under the first season type (primary, then fallbacks) that yields any. TVDB
+// 404s an ordering when the show's episodes don't exist under it (e.g. only
+// "official"/"dvd", not "default"), so a NotFoundError - or an empty result -
+// means "not under this ordering" and falls through to the next season type.
+// Non-404 errors are remembered but do not stop the scan (a transient error on
+// one ordering shouldn't hide a hit on another); if no ordering matches, the
+// first non-404 error is returned so real failures aren't masked as "not found".
+func (m *Mapper) fetchEpisodesBySeasonType(ctx context.Context, tvdbSeriesID, season, episode int) ([]tvdb.EpisodeBaseRecord, error) {
+	types := append([]string{m.tvdbSeasonType}, m.fallbackSeasonTypes...)
+	var firstErr error
+	for _, seasonType := range types {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		s, e := season, episode
+		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeriesID, seasonType, 0, &s, &e, nil)
+		if err != nil {
+			var nf *tvdb.NotFoundError
+			if errors.As(err, &nf) {
+				// Not present under this ordering - try the next season type.
+				continue
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if len(eps) > 0 {
+			return eps, nil
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return nil, nil
 }
 
 func findRemoteNumericID(ids []tvdb.RemoteID, hints []string) int {
