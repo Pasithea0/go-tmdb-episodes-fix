@@ -284,24 +284,50 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 			continue
 		}
 
-		for _, ep := range seasonEps {
-			if strings.TrimSpace(tvdbEp.Aired) != "" && strings.TrimSpace(ep.AirDate) != "" && tvdbEp.Aired == ep.AirDate {
-				res.TMDBSeason = seasonNum
-				res.TMDBEpisode = ep.EpisodeNumber
-				res.MatchedBy = "air_date_scan"
-				return res, nil
-			}
-
-			if strings.TrimSpace(tvdbEp.Name) != "" && normalizeName(tvdbEp.Name) == normalizeName(ep.Name) {
-				res.TMDBSeason = seasonNum
-				res.TMDBEpisode = ep.EpisodeNumber
-				res.MatchedBy = "name_scan"
-				return res, nil
-			}
+		if epNum, matchedBy := matchSeasonEpisode(tvdbEp, seasonEps); matchedBy != "" {
+			res.TMDBSeason = seasonNum
+			res.TMDBEpisode = epNum
+			res.MatchedBy = matchedBy
+			return res, nil
 		}
 	}
 
 	return nil, fmt.Errorf("unable to map tvdb %d s%de%d to tmdb", tvdbSeriesID, season, episode)
+}
+
+// matchSeasonEpisode picks the TMDB episode that best corresponds to a TVDB
+// episode within one season's episodes, and returns its episode number plus the
+// matching method ("" when nothing matches). Priority, most specific first:
+//
+//  1. exact normalized name — the strongest signal;
+//  2. air date AND episode number aligned — preferred over a bare air-date
+//     match because when a whole season shares one air date (e.g. a binge-drop
+//     release) a date-only scan would always return episode 1. Aligning on the
+//     number too selects the correct episode when the TVDB and TMDB orderings
+//     agree, which is the common case;
+//  3. bare air date — fallback for orderings that genuinely differ from TMDB
+//     (reordered episodes where numbers don't align).
+func matchSeasonEpisode(tvdbEp tvdb.EpisodeBaseRecord, seasonEps []tmdb.SeasonEpisode) (epNum int, matchedBy string) {
+	// 1) Exact name match — the strongest signal.
+	for _, ep := range seasonEps {
+		if strings.TrimSpace(tvdbEp.Name) != "" && normalizeName(tvdbEp.Name) == normalizeName(ep.Name) {
+			return ep.EpisodeNumber, "name_scan"
+		}
+	}
+	// 2) Air date AND episode-number alignment.
+	for _, ep := range seasonEps {
+		if strings.TrimSpace(tvdbEp.Aired) != "" && strings.TrimSpace(ep.AirDate) != "" &&
+			tvdbEp.Aired == ep.AirDate && ep.EpisodeNumber == tvdbEp.Number {
+			return ep.EpisodeNumber, "air_date+number_scan"
+		}
+	}
+	// 3) Bare air-date match.
+	for _, ep := range seasonEps {
+		if strings.TrimSpace(tvdbEp.Aired) != "" && strings.TrimSpace(ep.AirDate) != "" && tvdbEp.Aired == ep.AirDate {
+			return ep.EpisodeNumber, "air_date_scan"
+		}
+	}
+	return 0, ""
 }
 
 func pickBestByName(eps []tvdb.EpisodeBaseRecord, wantName string) *tvdb.EpisodeBaseRecord {
