@@ -221,6 +221,33 @@ func (c *Client) SearchSeriesByRemoteID(ctx context.Context, remoteID string) (*
 	return nil, nil
 }
 
+// FindSeriesByIMDbID resolves a TVDB series from an IMDb id (e.g. "tt0434665").
+// IMDb and TVDB usually share the same season/episode numbering, so the returned
+// series id can drive the tvdb->tmdb episode mapping for feeds that number by IMDb.
+func (c *Client) FindSeriesByIMDbID(ctx context.Context, imdbID string) (*SeriesBaseRecord, string, error) {
+	imdbID = strings.TrimSpace(imdbID)
+	if imdbID == "" {
+		return nil, "", errors.New("imdb id is required")
+	}
+
+	candidates := []string{
+		imdbID,
+		"imdb-" + imdbID,
+		"imdb:" + imdbID,
+	}
+
+	for _, candidate := range candidates {
+		s, err := c.SearchSeriesByRemoteID(ctx, candidate)
+		if err != nil {
+			return nil, "", err
+		}
+		if s != nil {
+			return s, candidate, nil
+		}
+	}
+	return nil, "", nil
+}
+
 func (c *Client) FindSeriesByTMDBID(ctx context.Context, tmdbID int) (*SeriesBaseRecord, string, error) {
 	candidates := []string{
 		strconv.Itoa(tmdbID),

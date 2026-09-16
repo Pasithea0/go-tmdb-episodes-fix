@@ -167,6 +167,7 @@ func (c *Client) GetTVDetails(ctx context.Context, tvID int) (*TVDetails, error)
 }
 
 type SeasonEpisode struct {
+	ID            int
 	EpisodeNumber int
 	Name          string
 	AirDate       string
@@ -176,6 +177,7 @@ func (c *Client) GetSeasonEpisodes(ctx context.Context, tvID int, season int) ([
 	path := fmt.Sprintf("/tv/%d/season/%d", tvID, season)
 	var resp struct {
 		Episodes []struct {
+			ID            int    `json:"id"`
 			EpisodeNumber int    `json:"episode_number"`
 			Name          string `json:"name"`
 			AirDate       string `json:"air_date"`
@@ -187,6 +189,7 @@ func (c *Client) GetSeasonEpisodes(ctx context.Context, tvID int, season int) ([
 	out := make([]SeasonEpisode, 0, len(resp.Episodes))
 	for _, ep := range resp.Episodes {
 		out = append(out, SeasonEpisode{
+			ID:            ep.ID,
 			EpisodeNumber: ep.EpisodeNumber,
 			Name:          ep.Name,
 			AirDate:       ep.AirDate,

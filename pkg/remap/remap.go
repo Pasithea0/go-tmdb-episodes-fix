@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/tmdb"
@@ -203,6 +204,130 @@ type TvdbToTmdbResult struct {
 	MatchedBy         string `json:"matched_by"`
 }
 
+type ImdbToTmdbResult struct {
+	InputIMDbID      string `json:"input_imdb_id"`
+	InputSeason      int    `json:"input_season"`
+	InputEpisode     int    `json:"input_episode"`
+	TVDBSeriesID     int    `json:"tvdb_series_id"`
+	TVDBSeriesName   string `json:"tvdb_series_name"`
+	TVDBSeriesLookup string `json:"tvdb_series_lookup"`
+	TVDBEpisodeID    int64  `json:"tvdb_episode_id"`
+	TVDBEpisodeName  string `json:"tvdb_episode_name"`
+	TVDBAirDate      string `json:"tvdb_air_date"`
+	TMDBSeriesID     int    `json:"tmdb_series_id"`
+	TMDBEpisodeID    int    `json:"tmdb_episode_id"`
+	TMDBSeason       int    `json:"tmdb_season"`
+	TMDBEpisode      int    `json:"tmdb_episode"`
+	MatchedBy        string `json:"matched_by"`
+}
+
+// ImdbToTmdb maps an IMDb-numbered (season, episode) to the equivalent TMDB
+// (season, episode). The mapper resolves the TVDB series from the IMDb id and
+// reuses the tvdb->tmdb flow, because TVDB and IMDb usually share the same
+// season/episode numbering — so an IMDb-numbered episode's TVDB record (name +
+// air date, via TVDB remote ids) is the key that finds it on TMDB.
+func (m *Mapper) ImdbToTmdb(ctx context.Context, imdbID string, season int, episode int) (*ImdbToTmdbResult, error) {
+	imdbID = strings.TrimSpace(imdbID)
+	if imdbID == "" {
+		return nil, errors.New("imdb id is required")
+	}
+	if m.tmdb == nil {
+		return nil, errors.New("tmdb bearer token is required for imdb->tmdb mapping")
+	}
+
+	tvdbSeries, lookupUsed, err := m.tvdb.FindSeriesByIMDbID(ctx, imdbID)
+	if err != nil {
+		return nil, err
+	}
+	if tvdbSeries == nil {
+		return nil, fmt.Errorf("tvdb series not found for imdb id %s", imdbID)
+	}
+
+	// Reuse TvdbToTmdb: it fetches the TVDB episode, prefers the TMDB remote id
+	// on the episode, and falls back to scanning TMDB seasons by name / air date.
+	t2t, err := m.TvdbToTmdb(ctx, tvdbSeries.ID, season, episode)
+	if err != nil {
+		return nil, fmt.Errorf("imdb %s s%de%d -> tvdb %d: %w", imdbID, season, episode, tvdbSeries.ID, err)
+	}
+
+	return &ImdbToTmdbResult{
+		InputIMDbID:      imdbID,
+		InputSeason:      season,
+		InputEpisode:     episode,
+		TVDBSeriesID:     tvdbSeries.ID,
+		TVDBSeriesName:   tvdbSeries.Name,
+		TVDBSeriesLookup: lookupUsed,
+		TVDBEpisodeID:    t2t.TVDBEpisodeID,
+		TVDBEpisodeName:  t2t.TVDBEpisodeName,
+		TVDBAirDate:      t2t.TVDBAirDate,
+		TMDBSeriesID:     t2t.TMDBSeriesID,
+		TMDBEpisodeID:    t2t.TMDBEpisodeID,
+		TMDBSeason:       t2t.TMDBSeason,
+		TMDBEpisode:      t2t.TMDBEpisode,
+		MatchedBy:        t2t.MatchedBy,
+	}, nil
+}
+
+// ImdbToTmdbWithTMDB maps an IMDb-numbered (season, episode) to the equivalent
+// TMDB (season, episode) when the caller already knows the TMDB series id (e.g.
+// from a feed-sync mismatches payload). This is the right entry point when the
+// TVDB series record has no TMDB remote id — the known id is used directly
+// instead of resolving it from TVDB. The TVDB series is still resolved from the
+// IMDb id to fetch the episode's name + air date (IMDb and TVDB usually share
+// season/episode numbering), which then find the episode on TMDB.
+func (m *Mapper) ImdbToTmdbWithTMDB(ctx context.Context, imdbID string, tmdbSeriesID int, season int, episode int) (*ImdbToTmdbResult, error) {
+	imdbID = strings.TrimSpace(imdbID)
+	if imdbID == "" {
+		return nil, errors.New("imdb id is required")
+	}
+	if tmdbSeriesID <= 0 {
+		return nil, errors.New("tmdb series id is required")
+	}
+	if m.tmdb == nil {
+		return nil, errors.New("tmdb bearer token is required for imdb->tmdb mapping")
+	}
+
+	tvdbSeries, lookupUsed, err := m.tvdb.FindSeriesByIMDbID(ctx, imdbID)
+	if err != nil {
+		return nil, err
+	}
+	if tvdbSeries == nil {
+		return nil, fmt.Errorf("tvdb series not found for imdb id %s", imdbID)
+	}
+
+	eps, err := m.fetchEpisodesBySeasonType(ctx, tvdbSeries.ID, season, episode)
+	if err != nil {
+		return nil, err
+	}
+	if len(eps) == 0 {
+		return nil, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d (tried season types: %s)",
+			tvdbSeries.ID, season, episode, m.seasonTypesTried())
+	}
+
+	tvdbEp := eps[0]
+	seasonNum, epNum, epID, matchedBy, err := m.scanTMDBSeasons(ctx, tmdbSeriesID, tvdbEp)
+	if err != nil {
+		return nil, fmt.Errorf("imdb %s s%de%d -> tvdb %d: %w", imdbID, season, episode, tvdbSeries.ID, err)
+	}
+
+	return &ImdbToTmdbResult{
+		InputIMDbID:      imdbID,
+		InputSeason:      season,
+		InputEpisode:     episode,
+		TVDBSeriesID:     tvdbSeries.ID,
+		TVDBSeriesName:   tvdbSeries.Name,
+		TVDBSeriesLookup: lookupUsed,
+		TVDBEpisodeID:    tvdbEp.ID,
+		TVDBEpisodeName:  tvdbEp.Name,
+		TVDBAirDate:      tvdbEp.Aired,
+		TMDBSeriesID:     tmdbSeriesID,
+		TMDBEpisodeID:    epID,
+		TMDBSeason:       seasonNum,
+		TMDBEpisode:      epNum,
+		MatchedBy:        matchedBy,
+	}, nil
+}
+
 func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, episode int) (*TvdbToTmdbResult, error) {
 	eps, err := m.fetchEpisodesBySeasonType(ctx, tvdbSeriesID, season, episode)
 	if err != nil {
@@ -268,9 +393,23 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 		return nil, errors.New("tvdb episode missing both air date and name; cannot scan tmdb seasons")
 	}
 
-	tv, err := m.tmdb.GetTVDetails(ctx, tmdbSeriesID)
+	seasonNum, epNum, epID, matchedBy, err := m.scanTMDBSeasons(ctx, tmdbSeriesID, tvdbEp)
 	if err != nil {
 		return nil, err
+	}
+	res.TMDBSeason = seasonNum
+	res.TMDBEpisode = epNum
+	res.TMDBEpisodeID = epID
+	res.MatchedBy = matchedBy
+	return res, nil
+}
+
+// scanTMDBSeasons finds the TMDB (season, episode) matching a TVDB episode by
+// scanning every season of the given TMDB series with matchSeasonEpisode.
+func (m *Mapper) scanTMDBSeasons(ctx context.Context, tmdbSeriesID int, tvdbEp tvdb.EpisodeBaseRecord) (seasonNum int, epNum int, epID int, matchedBy string, err error) {
+	tv, err := m.tmdb.GetTVDetails(ctx, tmdbSeriesID)
+	if err != nil {
+		return 0, 0, 0, "", err
 	}
 
 	limit := tv.NumberOfSeasons
@@ -284,20 +423,17 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 			continue
 		}
 
-		if epNum, matchedBy := matchSeasonEpisode(tvdbEp, seasonEps); matchedBy != "" {
-			res.TMDBSeason = seasonNum
-			res.TMDBEpisode = epNum
-			res.MatchedBy = matchedBy
-			return res, nil
+		if epNum, epID, matchedBy := matchSeasonEpisode(tvdbEp, seasonEps); matchedBy != "" {
+			return seasonNum, epNum, epID, matchedBy, nil
 		}
 	}
-
-	return nil, fmt.Errorf("unable to map tvdb %d s%de%d to tmdb", tvdbSeriesID, season, episode)
+	return 0, 0, 0, "", fmt.Errorf("unable to map tvdb episode %q (aired %s) to tmdb %d", tvdbEp.Name, tvdbEp.Aired, tmdbSeriesID)
 }
 
 // matchSeasonEpisode picks the TMDB episode that best corresponds to a TVDB
-// episode within one season's episodes, and returns its episode number plus the
-// matching method ("" when nothing matches). Priority, most specific first:
+// episode within one season's episodes, and returns its episode number, its
+// TMDB episode id, and the matching method ("" when nothing matches).
+// Priority, most specific first:
 //
 //  1. exact normalized name — the strongest signal;
 //  2. air date AND episode number aligned — preferred over a bare air-date
@@ -307,27 +443,42 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 //     agree, which is the common case;
 //  3. bare air date — fallback for orderings that genuinely differ from TMDB
 //     (reordered episodes where numbers don't align).
-func matchSeasonEpisode(tvdbEp tvdb.EpisodeBaseRecord, seasonEps []tmdb.SeasonEpisode) (epNum int, matchedBy string) {
+func matchSeasonEpisode(tvdbEp tvdb.EpisodeBaseRecord, seasonEps []tmdb.SeasonEpisode) (epNum int, epID int, matchedBy string) {
 	// 1) Exact name match — the strongest signal.
 	for _, ep := range seasonEps {
 		if strings.TrimSpace(tvdbEp.Name) != "" && normalizeName(tvdbEp.Name) == normalizeName(ep.Name) {
-			return ep.EpisodeNumber, "name_scan"
+			return ep.EpisodeNumber, ep.ID, "name_scan"
 		}
 	}
-	// 2) Air date AND episode-number alignment.
+	// 2) Air date AND episode-number alignment. The date comparison tolerates a
+	// one-day difference: TVDB often records the Japanese broadcast date while
+	// TMDB uses the local one, so the same episode can be 2023-09-28 on TVDB and
+	// 2023-09-29 on TMDB.
 	for _, ep := range seasonEps {
 		if strings.TrimSpace(tvdbEp.Aired) != "" && strings.TrimSpace(ep.AirDate) != "" &&
-			tvdbEp.Aired == ep.AirDate && ep.EpisodeNumber == tvdbEp.Number {
-			return ep.EpisodeNumber, "air_date+number_scan"
+			datesWithinOneDay(tvdbEp.Aired, ep.AirDate) && ep.EpisodeNumber == tvdbEp.Number {
+			return ep.EpisodeNumber, ep.ID, "air_date+number_scan"
 		}
 	}
-	// 3) Bare air-date match.
+	// 3) Bare air-date match (same one-day tolerance).
 	for _, ep := range seasonEps {
-		if strings.TrimSpace(tvdbEp.Aired) != "" && strings.TrimSpace(ep.AirDate) != "" && tvdbEp.Aired == ep.AirDate {
-			return ep.EpisodeNumber, "air_date_scan"
+		if strings.TrimSpace(tvdbEp.Aired) != "" && strings.TrimSpace(ep.AirDate) != "" && datesWithinOneDay(tvdbEp.Aired, ep.AirDate) {
+			return ep.EpisodeNumber, ep.ID, "air_date_scan"
 		}
 	}
-	return 0, ""
+	return 0, 0, ""
+}
+
+// datesWithinOneDay reports whether two YYYY-MM-DD dates are the same day or
+// exactly one day apart (TVDB vs TMDB air-date skew).
+func datesWithinOneDay(a, b string) bool {
+	ta, errA := time.Parse("2006-01-02", strings.TrimSpace(a))
+	tb, errB := time.Parse("2006-01-02", strings.TrimSpace(b))
+	if errA != nil || errB != nil {
+		return false
+	}
+	d := ta.Sub(tb)
+	return d >= -24*time.Hour && d <= 24*time.Hour
 }
 
 func pickBestByName(eps []tvdb.EpisodeBaseRecord, wantName string) *tvdb.EpisodeBaseRecord {
