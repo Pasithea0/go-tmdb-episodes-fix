@@ -14,13 +14,13 @@ import (
 )
 
 type Options struct {
-	TVDBAPIKey        string
-	TVDBPIN           string
-	TMDBBearerToken   string
-	TVDBSeasonType    string
+	TVDBAPIKey          string
+	TVDBPIN             string
+	TMDBBearerToken     string
+	TVDBSeasonType      string
 	FallbackSeasonTypes []string
-	MaxTVDBPageScan   int
-	MaxTMDBSeasonScan int
+	MaxTVDBPageScan     int
+	MaxTMDBSeasonScan   int
 }
 
 var defaultFallbackSeasonTypes = []string{"official", "dvd", "alternate", "regional"}
@@ -427,7 +427,72 @@ func (m *Mapper) scanTMDBSeasons(ctx context.Context, tmdbSeriesID int, tvdbEp t
 			return seasonNum, epNum, epID, matchedBy, nil
 		}
 	}
+
+	// Fallback: TMDB's own "TVDB Order" episode group maps TVDB season/episode
+	// positions directly to TMDB episodes. Use it when the name/air-date scan
+	// fails (e.g. TVDB's air date is off by more than a day, or the names are
+	// in different languages). The group's season bucket order is the TVDB
+	// season number; the episode's 0-based position within the bucket is the
+	// TVDB episode number - 1. The mapped TMDB season/episode numbers and id
+	// come from the group entry itself.
+	if m.tvdbSeasonType == "default" || m.tvdbSeasonType == "" {
+		if epID, tmdbSeason, tmdbEpisode := m.mapViaTVDBOrderGroup(ctx, tmdbSeriesID, tvdbEp); epID != 0 {
+			return tmdbSeason, tmdbEpisode, epID, "tvdb_order_group", nil
+		}
+	}
+
 	return 0, 0, 0, "", fmt.Errorf("unable to map tvdb episode %q (aired %s) to tmdb %d", tvdbEp.Name, tvdbEp.Aired, tmdbSeriesID)
+}
+
+// mapViaTVDBOrderGroup tries TMDB's "TVDB Order" episode group for the series
+// and returns the TMDB episode id/season/episode for the given TVDB episode,
+// or 0 when the group doesn't exist or lacks the episode.
+func (m *Mapper) mapViaTVDBOrderGroup(ctx context.Context, tmdbSeriesID int, tvdbEp tvdb.EpisodeBaseRecord) (epID int, tmdbSeason int, tmdbEpisode int) {
+	groups, err := m.tmdb.GetEpisodeGroups(ctx, tmdbSeriesID)
+	if err != nil {
+		return 0, 0, 0
+	}
+
+	var groupID string
+	for _, g := range groups {
+		name := strings.ToLower(g.Name)
+		if strings.Contains(name, "tvdb") {
+			groupID = g.ID
+			break
+		}
+	}
+	if groupID == "" {
+		return 0, 0, 0
+	}
+
+	detail, err := m.tmdb.GetEpisodeGroup(ctx, groupID)
+	if err != nil {
+		return 0, 0, 0
+	}
+
+	for _, bucket := range detail.Groups {
+		if epID, season, episode := lookupInGroupBucket(bucket, tvdbEp); epID != 0 {
+			return epID, season, episode
+		}
+	}
+	return 0, 0, 0
+}
+
+// lookupInGroupBucket finds the TMDB episode in one group bucket that matches a
+// TVDB episode. The bucket's Order is the TVDB season number (a mismatched
+// bucket never matches); each entry's 0-based Order is the TVDB episode number
+// - 1. Returns the mapped TMDB episode id/season/episode, or 0 when not
+// present.
+func lookupInGroupBucket(bucket tmdb.EpisodeGroupOrder, tvdbEp tvdb.EpisodeBaseRecord) (epID int, season int, episode int) {
+	if bucket.Order != tvdbEp.SeasonNumber {
+		return 0, 0, 0
+	}
+	for _, entry := range bucket.Episodes {
+		if entry.Order == tvdbEp.Number-1 {
+			return entry.ID, entry.SeasonNumber, entry.EpisodeNumber
+		}
+	}
+	return 0, 0, 0
 }
 
 // matchSeasonEpisode picks the TMDB episode that best corresponds to a TVDB

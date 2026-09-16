@@ -173,6 +173,96 @@ type SeasonEpisode struct {
 	AirDate       string
 }
 
+type EpisodeGroup struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type int    `json:"type"`
+}
+
+// EpisodeGroupEntry is one episode inside an episode group ordering. Order is
+// the 0-based position within the group (so position N has Order N-1); the
+// season/episode numbers are the TMDB ones for the mapped episode.
+type EpisodeGroupEntry struct {
+	ID            int    `json:"id"`
+	Name          string `json:"name"`
+	AirDate       string `json:"air_date"`
+	SeasonNumber  int    `json:"season_number"`
+	EpisodeNumber int    `json:"episode_number"`
+	Order         int    `json:"order"`
+}
+
+// EpisodeGroupOrder is one season bucket inside an episode group.
+type EpisodeGroupOrder struct {
+	Order    int                 `json:"order"`
+	Episodes []EpisodeGroupEntry `json:"episodes"`
+}
+
+type EpisodeGroupDetail struct {
+	ID     string              `json:"id"`
+	Name   string              `json:"name"`
+	Groups []EpisodeGroupOrder `json:"groups"`
+}
+
+func (c *Client) GetEpisodeGroups(ctx context.Context, tvID int) ([]EpisodeGroup, error) {
+	path := fmt.Sprintf("/tv/%d/episode_groups", tvID)
+	var resp struct {
+		Results []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Type int    `json:"type"`
+		} `json:"results"`
+	}
+	if err := c.doGet(ctx, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	out := make([]EpisodeGroup, 0, len(resp.Results))
+	for _, g := range resp.Results {
+		out = append(out, EpisodeGroup{ID: g.ID, Name: g.Name, Type: g.Type})
+	}
+	return out, nil
+}
+
+func (c *Client) GetEpisodeGroup(ctx context.Context, groupID string) (*EpisodeGroupDetail, error) {
+	path := "/tv/episode_group/" + url.PathEscape(groupID)
+	var resp struct {
+		ID     string `json:"id"`
+		Name   string `json:"name"`
+		Groups []struct {
+			Order    int `json:"order"`
+			Episodes []struct {
+				ID            int    `json:"id"`
+				Name          string `json:"name"`
+				AirDate       string `json:"air_date"`
+				SeasonNumber  int    `json:"season_number"`
+				EpisodeNumber int    `json:"episode_number"`
+				Order         int    `json:"order"`
+			} `json:"episodes"`
+		} `json:"groups"`
+	}
+	if err := c.doGet(ctx, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	if resp.ID == "" {
+		return nil, errors.New("tmdb episode group returned empty id")
+	}
+	detail := &EpisodeGroupDetail{ID: resp.ID, Name: resp.Name}
+	for _, g := range resp.Groups {
+		order := EpisodeGroupOrder{Order: g.Order}
+		for _, e := range g.Episodes {
+			order.Episodes = append(order.Episodes, EpisodeGroupEntry{
+				ID:            e.ID,
+				Name:          e.Name,
+				AirDate:       e.AirDate,
+				SeasonNumber:  e.SeasonNumber,
+				EpisodeNumber: e.EpisodeNumber,
+				Order:         e.Order,
+			})
+		}
+		detail.Groups = append(detail.Groups, order)
+	}
+	return detail, nil
+}
+
 func (c *Client) GetSeasonEpisodes(ctx context.Context, tvID int, season int) ([]SeasonEpisode, error) {
 	path := fmt.Sprintf("/tv/%d/season/%d", tvID, season)
 	var resp struct {
@@ -197,4 +287,3 @@ func (c *Client) GetSeasonEpisodes(ctx context.Context, tvID int, season int) ([
 	}
 	return out, nil
 }
-

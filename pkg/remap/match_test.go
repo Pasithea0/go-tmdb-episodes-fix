@@ -116,3 +116,36 @@ func TestDatesWithinOneDay(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupInGroupBucket(t *testing.T) {
+	// Bucket order 5 = TVDB season 5; entry.Order is 0-based, so position 10
+	// (TVDB s5e10) has Order 9 and maps to TMDB s1e101 (id 1517234) — the
+	// exact Bleach case that the air-date scan could not resolve.
+	bucket := tmdb.EpisodeGroupOrder{
+		Order: 5,
+		Episodes: []tmdb.EpisodeGroupEntry{
+			{ID: 1517225, SeasonNumber: 1, EpisodeNumber: 92, Order: 0},
+			{ID: 1517226, SeasonNumber: 1, EpisodeNumber: 93, Order: 1},
+			{ID: 1517234, SeasonNumber: 1, EpisodeNumber: 101, Order: 9},
+		},
+	}
+
+	tvdbEp := tvdb.EpisodeBaseRecord{SeasonNumber: 5, Number: 10, Name: "マユリ卍解!! 沢渡・悪魔の激突", Aired: "2006-10-25"}
+	epID, season, episode := lookupInGroupBucket(bucket, tvdbEp)
+	if epID != 1517234 || season != 1 || episode != 101 {
+		t.Fatalf("expected (1517234, 1, 101), got (%d, %d, %d)", epID, season, episode)
+	}
+
+	// Wrong bucket (season mismatch) must not match.
+	tvdbEp.SeasonNumber = 6
+	if epID, _, _ := lookupInGroupBucket(bucket, tvdbEp); epID != 0 {
+		t.Fatalf("expected no match for wrong season, got %d", epID)
+	}
+
+	// Episode beyond the bucket's range must not match.
+	tvdbEp.SeasonNumber = 5
+	tvdbEp.Number = 20
+	if epID, _, _ := lookupInGroupBucket(bucket, tvdbEp); epID != 0 {
+		t.Fatalf("expected no match for out-of-range episode, got %d", epID)
+	}
+}
