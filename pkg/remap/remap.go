@@ -171,6 +171,12 @@ func (m *Mapper) TmdbToTvdbInOrder(ctx context.Context, tmdbSeriesID int, season
 
 	if strings.TrimSpace(tmdbEp.AirDate) != "" {
 		airDate := tmdbEp.AirDate
+		// Safe to read a single page here: the airDate filter is applied by TVDB,
+		// not by us. Verified live 2026-09-25 -- One Piece (1242 episodes, pages
+		// of 500) returns exactly the one episode for airDate=2024-01-07, which
+		// sits beyond page 0. If this ever stopped being server-side, page 0
+		// would return up to 500 episodes and the len(eps)==1 check below would
+		// quietly never match for long series.
 		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, normalizedOrder, 0, nil, nil, &airDate)
 		if err != nil {
 			return nil, err

@@ -11,15 +11,35 @@ import (
 	"github.com/Pasithea0/go-tmdb-episodes-fix/pkg/tvdb"
 )
 
-// --- fakes -----------------------------------------------------------------
+// This file covers the tmdb2tvdb direction. Every fixture value below was read
+// from live TMDB and TVDB on 2026-09-25 and is reproduced verbatim, because the
+// whole point of this direction is *which real episode* a coordinate means.
+//
+//	TMDB 615 Futurama (external_ids tvdb_id=73871)
+//	  S1E1 id 35076  "Space Pilot 3000"       1999-03-28
+//	  S6E1 id 35077  "Rebirth"                2010-06-24
+//	  S7E1 id 35107  "The Bots and the Bees"  2012-06-20
+//	TVDB 73871 "default"
+//	  s1e1 id 1001     "Space Pilot 3000"       1999-03-28
+//	  s6e1 id 1051911  "Rebirth"                2010-06-24
+//	  s7e1 id 4319164  "The Bots and the Bees"  2012-06-20
+//	TVDB 73871 "alternate"
+//	  s6e1 id 8234611  "Bender's Big Score (1)" 2008-03-23
+//	  s7e1 id 1051911  "Rebirth"                2010-06-24
+//
+// The critical property to keep in mind while reading the fixtures: TVDB
+// "default" s6e1 and "alternate" s6e1 carry the SAME numbers and are DIFFERENT
+// episodes, and the same episode ("Rebirth") lives at default s6e1 but at
+// alternate s7e1.
+
+// --- fakes ------------------------------------------------------------------
 //
 // The mapping rules are the part that silently hands back the wrong episode, so
 // they are tested directly against fixtures rather than through a live client.
 
 type fakeTVDB struct {
-	// seriesByTMDB is what FindSeriesByTMDBID returns. It deliberately models
-	// TVDB's bare-number remote-id search, which returns a wrong series when a
-	// number collides across id namespaces.
+	// seriesByTMDB models FindSeriesByTMDBID, including TVDB's bare-number
+	// remote-id search, which returns a wrong series when a number collides.
 	seriesByTMDB map[int]*tvdb.SeriesBaseRecord
 	// seriesByRemote models SearchSeriesByRemoteID, keyed by the raw search term.
 	seriesByRemote map[string]*tvdb.SeriesBaseRecord
@@ -27,7 +47,7 @@ type fakeTVDB struct {
 	episodes map[int]map[string][]tvdb.EpisodeBaseRecord
 	// episodesByID indexes the same records by episode id.
 	episodesByID map[int64]tvdb.EpisodeBaseRecord
-	// seriesByID backs GetSeriesExtended, used to read a series' name when
+	// seriesByID backs GetSeriesExtended, used to read a series name when
 	// corroborating a link.
 	seriesByID map[int]*tvdb.SeriesBaseRecord
 
@@ -110,9 +130,7 @@ func (f *fakeTVDB) GetSeriesEpisodes(
 type fakeTMDB struct {
 	details map[string]*tmdb.EpisodeDetails // key "series/season/episode"
 	names   map[int]string                  // series id -> series name
-	// tvdbID is what GetTvdbIDFromTmdbID-style resolution yields; modelled as the
-	// external_ids route.
-	tvdbID map[int]int
+	tvdbID  map[int]int                     // external_ids route
 }
 
 func (f *fakeTMDB) GetEpisodeDetails(_ context.Context, tvID, season, episode int) (*tmdb.EpisodeDetails, error) {
@@ -132,13 +150,6 @@ func (f *fakeTMDB) GetTVDetails(_ context.Context, tvID int) (*tmdb.TVDetails, e
 	return &tmdb.TVDetails{Name: name, NumberOfSeasons: 1}, nil
 }
 
-func (f *fakeTMDB) GetEpisodeGroups(context.Context, int) ([]tmdb.EpisodeGroup, error) {
-	return nil, nil
-}
-func (f *fakeTMDB) GetEpisodeGroup(context.Context, string) (*tmdb.EpisodeGroupDetail, error) {
-	return nil, nil
-}
-
 // GetTvdbIDFromTmdbID models TMDB's external_ids route.
 func (f *fakeTMDB) GetTvdbIDFromTmdbID(_ context.Context, tvID int) (int, error) {
 	if id, ok := f.tvdbID[tvID]; ok {
@@ -146,56 +157,69 @@ func (f *fakeTMDB) GetTvdbIDFromTmdbID(_ context.Context, tvID int) (int, error)
 	}
 	return 0, nil
 }
+
+func (f *fakeTMDB) GetEpisodeGroups(context.Context, int) ([]tmdb.EpisodeGroup, error) {
+	return nil, nil
+}
+func (f *fakeTMDB) GetEpisodeGroup(context.Context, string) (*tmdb.EpisodeGroupDetail, error) {
+	return nil, nil
+}
 func (f *fakeTMDB) GetSeasonEpisodes(context.Context, int, int) ([]tmdb.SeasonEpisode, error) {
 	return nil, nil
 }
 
-// --- the Futurama fixture ---------------------------------------------------
-//
-// TMDB Futurama S6E1 is "Bender's Big Score (1)", aired 2008-03-23.
-// TVDB default S6E1 is "Rebirth", aired 2010-06-24. The two orders disagree, so
-// the same numbers name different episodes. Verified live 2026-09-25.
+// --- the Futurama fixture (real values) -------------------------------------
+
+func futuramaTVDB() *fakeTVDB {
+	return &fakeTVDB{
+		seriesByTMDB: map[int]*tvdb.SeriesBaseRecord{
+			615: {ID: 73871, Name: "Futurama"},
+		},
+		seriesByRemote: map[string]*tvdb.SeriesBaseRecord{
+			"imdb:tt0149460": {ID: 73871, Name: "Futurama"},
+			"tmdb-615":       {ID: 73871, Name: "Futurama"},
+		},
+		seriesByID: map[int]*tvdb.SeriesBaseRecord{
+			73871: {ID: 73871, Name: "Futurama"},
+		},
+		episodes: map[int]map[string][]tvdb.EpisodeBaseRecord{
+			73871: {
+				"default": {
+					{ID: 1001, Name: "Space Pilot 3000", Aired: "1999-03-28", SeriesID: 73871, SeasonNumber: 1, Number: 1},
+					{ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeriesID: 73871, SeasonNumber: 6, Number: 1},
+					{ID: 4319164, Name: "The Bots and the Bees", Aired: "2012-06-20", SeriesID: 73871, SeasonNumber: 7, Number: 1},
+				},
+				"alternate": {
+					{ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeriesID: 73871, SeasonNumber: 6, Number: 1},
+					{ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeriesID: 73871, SeasonNumber: 7, Number: 1},
+				},
+			},
+		},
+		episodesByID: map[int64]tvdb.EpisodeBaseRecord{
+			1051911: {ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeasonNumber: 6, Number: 1},
+			8234611: {ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeasonNumber: 6, Number: 1},
+		},
+		lookupUsed: "tmdb",
+	}
+}
+
+func futuramaTMDB() *fakeTMDB {
+	return &fakeTMDB{
+		details: map[string]*tmdb.EpisodeDetails{
+			"615/1/1": {ID: 35076, Name: "Space Pilot 3000", AirDate: "1999-03-28", SeasonNumber: 1, EpisodeNumber: 1},
+			"615/6/1": {ID: 35077, Name: "Rebirth", AirDate: "2010-06-24", SeasonNumber: 6, EpisodeNumber: 1},
+			"615/7/1": {ID: 35107, Name: "The Bots and the Bees", AirDate: "2012-06-20", SeasonNumber: 7, EpisodeNumber: 1},
+		},
+		names:  map[int]string{615: "Futurama"},
+		tvdbID: map[int]int{615: 73871},
+	}
+}
 
 func futuramaMapper(t *testing.T) *Mapper {
 	t.Helper()
 	return &Mapper{
-		tvdb: &fakeTVDB{
-			seriesByTMDB: map[int]*tvdb.SeriesBaseRecord{
-				615: {ID: 73871, Name: "Futurama"},
-			},
-			seriesByRemote: map[string]*tvdb.SeriesBaseRecord{
-				"imdb:tt0149460": {ID: 73871, Name: "Futurama"},
-				"tmdb-615":       {ID: 73871, Name: "Futurama"},
-			},
-			episodes: map[int]map[string][]tvdb.EpisodeBaseRecord{
-				73871: {
-					"default": {
-						{ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeriesID: 73871, SeasonNumber: 6, Number: 1},
-						{ID: 1051912, Name: "In-A-Gadda-Da-Leela", Aired: "2010-07-01", SeriesID: 73871, SeasonNumber: 6, Number: 2},
-						{ID: 1001, Name: "Space Pilot 3000", Aired: "1999-03-28", SeriesID: 73871, SeasonNumber: 1, Number: 1},
-					},
-					"alternate": {
-						{ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeriesID: 73871, SeasonNumber: 6, Number: 1},
-					},
-				},
-			},
-			episodesByID: map[int64]tvdb.EpisodeBaseRecord{
-				1051911: {ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeasonNumber: 6, Number: 1},
-				8234611: {ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeasonNumber: 6, Number: 1},
-			},
-			seriesByID: map[int]*tvdb.SeriesBaseRecord{
-				73871: {ID: 73871, Name: "Futurama"},
-			},
-			lookupUsed: "tmdb",
-		},
-		tmdb: &fakeTMDB{
-			details: map[string]*tmdb.EpisodeDetails{
-				"615/6/1": {ID: 900001, Name: "Bender's Big Score (1)", AirDate: "2008-03-23", SeasonNumber: 6, EpisodeNumber: 1},
-				"615/1/1": {ID: 900002, Name: "Space Pilot 3000", AirDate: "1999-03-28", SeasonNumber: 1, EpisodeNumber: 1},
-			},
-			names:  map[int]string{615: "Futurama"},
-			tvdbID: map[int]int{615: 73871},
-		},
+		tvdb:                futuramaTVDB(),
+		tmdb:                futuramaTMDB(),
 		tvdbSeasonType:      "default",
 		fallbackSeasonTypes: defaultFallbackSeasonTypes,
 		maxTVDBPages:        200,
@@ -205,30 +229,40 @@ func futuramaMapper(t *testing.T) *Mapper {
 
 // --- Task 0.0 ---------------------------------------------------------------
 
-// TestTmdbToTvdbRefusesSameCoordinateFallback pins that an unmatchable episode
-// returns an error instead of a same-numbered episode from the wrong order.
-// TMDB S6E1 is "Bender's Big Score (1)"; returning TVDB default S6E1 "Rebirth"
-// is a wrong answer, not a best-effort match.
+// TestTmdbToTvdbRefusesSameCoordinateFallback pins that an episode the evidence
+// cannot place is an error, not whatever TVDB episode shares its numbers.
+//
+// TMDB 615 S7E1 is "The Bots and the Bees" (2012-06-20). Under the "alternate"
+// order TVDB has no episode on that date and none by that name, while alternate
+// s7e1 is "Rebirth" (2010-06-24) -- a different episode with the same numbers.
+// Handing back "Rebirth" is the bug.
 func TestTmdbToTvdbRefusesSameCoordinateFallback(t *testing.T) {
 	m := futuramaMapper(t)
 
-	got, err := m.TmdbToTvdb(context.Background(), 615, 6, 1)
+	got, err := m.TmdbToTvdbInOrder(context.Background(), 615, 7, 1, "alternate")
 	if err == nil {
-		if got.TVDBEpisodeName == "Rebirth" {
-			t.Fatalf("returned TVDB default S6E1 %q for a request about %q — "+
-				"that is the same-coordinate guess, not a mapping",
-				got.TVDBEpisodeName, "Bender's Big Score (1)")
-		}
-		t.Fatalf("expected an error; got episode %q via matched_by=%q",
-			got.TVDBEpisodeName, got.MatchedBy)
+		t.Fatalf("expected an error for an unplaceable episode; got %q (%d) via matched_by=%q",
+			got.TVDBEpisodeName, got.TVDBEpisodeID, got.MatchedBy)
 	}
 	if !strings.Contains(err.Error(), "unable to map") {
 		t.Fatalf("want an 'unable to map' error, got %v", err)
 	}
 }
 
-// TestTmdbToTvdbMapsWhenEvidenceAgrees is the positive control: when the air date
-// does identify the episode, the mapping still happens.
+// TestTmdbToTvdbDoesNotReturnTheWrongEpisodeByNumbers states the same case as an
+// assertion about the answer: alternate s7e1 "Rebirth" must never come back for a
+// question about "The Bots and the Bees".
+func TestTmdbToTvdbDoesNotReturnTheWrongEpisodeByNumbers(t *testing.T) {
+	m := futuramaMapper(t)
+
+	got, err := m.TmdbToTvdbInOrder(context.Background(), 615, 7, 1, "alternate")
+	if err == nil && got.TVDBEpisodeName == "Rebirth" {
+		t.Fatalf("returned alternate s7e1 %q for TMDB S7E1 %q: same numbers, different episode",
+			got.TVDBEpisodeName, "The Bots and the Bees")
+	}
+}
+
+// TestTmdbToTvdbMapsWhenEvidenceAgrees is the positive control.
 func TestTmdbToTvdbMapsWhenEvidenceAgrees(t *testing.T) {
 	m := futuramaMapper(t)
 
@@ -250,13 +284,17 @@ func TestTmdbToTvdbCoordinateFallbackIsOptIn(t *testing.T) {
 	m := futuramaMapper(t)
 	m.allowCoordinateIdentityFallback = true
 
-	got, err := m.TmdbToTvdb(context.Background(), 615, 6, 1)
+	got, err := m.TmdbToTvdbInOrder(context.Background(), 615, 7, 1, "alternate")
 	if err != nil {
 		t.Fatalf("fallback was opted in, expected a result: %v", err)
 	}
 	if got.MatchedBy != "assumed_same_coordinates" {
 		t.Fatalf("got matched_by %q; an assumption must never be reported as a match",
 			got.MatchedBy)
+	}
+	if got.TVDBEpisodeName != "Rebirth" {
+		t.Fatalf("expected the same-coordinate episode %q, got %q",
+			"Rebirth", got.TVDBEpisodeName)
 	}
 }
 
@@ -353,7 +391,7 @@ func TestNamesCorroborate(t *testing.T) {
 		{"american dad", "American Dad!", true},
 		{"Futurama", "Futurama", true},
 		{"American Dad!", "War and Remembrance", false},
-		{"Futurama", "Futurama (1999)", false}, // year suffix is not stripped
+		{"Futurama", "Futurama (1999)", false}, // a year suffix is not stripped
 		{"", "Futurama", false},
 		{"Futurama", "", false},
 	}
@@ -366,29 +404,40 @@ func TestNamesCorroborate(t *testing.T) {
 
 // --- Task 0.0c --------------------------------------------------------------
 
-// TestTmdbToTvdbInOrderResolvesAlternate pins the whole point of naming an order:
-// the same TMDB coordinate resolves to different TVDB episodes depending on which
-// order is consulted. TMDB S6E1 aired 2008-03-23; under "alternate" that places it
-// at TVDB S6E1 "Bender's Big Score (1)", while "default" has no episode on that
-// date at all.
+// TestTmdbToTvdbInOrderResolvesAlternate pins the point of naming an order: the
+// same TMDB coordinate resolves to different TVDB episodes in different orders.
+//
+// TMDB S6E1 is "Rebirth" (2010-06-24). Under "default" that is default s6e1.
+// Under "alternate", s6e1 is "Bender's Big Score (1)" (2008-03-23), so the same
+// TMDB episode answers at alternate s7e1 instead.
 func TestTmdbToTvdbInOrderResolvesAlternate(t *testing.T) {
 	m := futuramaMapper(t)
 
-	got, err := m.TmdbToTvdbInOrder(context.Background(), 615, 6, 1, "alternate")
+	def, err := m.TmdbToTvdbInOrder(context.Background(), 615, 6, 1, "default")
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("default: unexpected error: %v", err)
 	}
-	if got.TVDBEpisodeName != "Bender's Big Score (1)" {
-		t.Fatalf("got %q, want %q", got.TVDBEpisodeName, "Bender's Big Score (1)")
+	if def.TVDBEpisodeID != 1051911 || def.TVDBSeason != 6 || def.TVDBEpisode != 1 {
+		t.Fatalf("default: got episode %d at s%de%d, want 1051911 at s6e1",
+			def.TVDBEpisodeID, def.TVDBSeason, def.TVDBEpisode)
 	}
-	if got.TVDBEpisodeID != 8234611 {
-		t.Fatalf("got episode id %d, want 8234611", got.TVDBEpisodeID)
+
+	alt, err := m.TmdbToTvdbInOrder(context.Background(), 615, 6, 1, "alternate")
+	if err != nil {
+		t.Fatalf("alternate: unexpected error: %v", err)
+	}
+	if alt.TVDBEpisodeID != 1051911 {
+		t.Fatalf("alternate: got episode %d, want 1051911 (Rebirth)", alt.TVDBEpisodeID)
+	}
+	if alt.TVDBSeason != 7 || alt.TVDBEpisode != 1 {
+		t.Fatalf("alternate: got s%de%d, want s7e1 -- the same episode has different "+
+			"numbers in a different order", alt.TVDBSeason, alt.TVDBEpisode)
 	}
 }
 
 // TestTmdbToTvdbInOrderRejectsUnknownOrder pins that a typo'd order is an error
-// rather than a silent fallback to default -- silently answering in the wrong
-// order is the failure mode this whole change exists to remove.
+// rather than a silent fallback to default -- answering in the wrong order
+// without saying so is the failure mode this change exists to remove.
 func TestTmdbToTvdbInOrderRejectsUnknownOrder(t *testing.T) {
 	m := futuramaMapper(t)
 
@@ -414,20 +463,19 @@ func TestTmdbToTvdbInOrderEmptyUsesConfiguredOrder(t *testing.T) {
 // --- Task 0.0e --------------------------------------------------------------
 
 // TestTmdbToTvdbWithHintsAlternateConfirmedByTitle covers the intended use:
-// resolve in the alternate order, then confirm with the episode title before
-// accepting the answer.
+// resolve in a named order, then confirm with the episode title before accepting.
 func TestTmdbToTvdbWithHintsAlternateConfirmedByTitle(t *testing.T) {
 	m := futuramaMapper(t)
 
 	got, err := m.TmdbToTvdbWithHints(context.Background(), 615, 6, 1, EpisodeHints{
 		TVDBOrder:   "alternate",
-		EpisodeName: "Bender's Big Score (1)",
+		EpisodeName: "Rebirth",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.TVDBEpisodeID != 8234611 {
-		t.Fatalf("got episode id %d, want 8234611", got.TVDBEpisodeID)
+	if got.TVDBEpisodeID != 1051911 {
+		t.Fatalf("got episode id %d, want 1051911", got.TVDBEpisodeID)
 	}
 	if got.MatchedBy != "air_date+name" {
 		t.Fatalf("got matched_by %q, want %q (the title confirmed the date match)",
@@ -435,15 +483,16 @@ func TestTmdbToTvdbWithHintsAlternateConfirmedByTitle(t *testing.T) {
 	}
 }
 
-// TestTmdbToTvdbWithHintsRejectsContradictingTitle is the guard the user asked
-// for: the numbers resolve, but the title says otherwise, so the answer is
-// refused rather than accepted on numbering alone.
+// TestTmdbToTvdbWithHintsRejectsContradictingTitle is the guard the direction
+// needs: the numbers resolve, but the title says otherwise, so the answer is
+// refused rather than accepted on numbering alone. Here the numbers land on
+// alternate s7e1 "Rebirth" while the caller insists on "Bender's Big Score (1)".
 func TestTmdbToTvdbWithHintsRejectsContradictingTitle(t *testing.T) {
 	m := futuramaMapper(t)
 
 	_, err := m.TmdbToTvdbWithHints(context.Background(), 615, 6, 1, EpisodeHints{
 		TVDBOrder:   "alternate",
-		EpisodeName: "Rebirth", // actually TVDB default S6E1
+		EpisodeName: "Bender's Big Score (1)",
 	})
 	if err == nil {
 		t.Fatal("accepted a match whose title contradicts the caller")
@@ -458,8 +507,8 @@ func TestTmdbToTvdbWithHintsRejectsContradictingTitle(t *testing.T) {
 }
 
 // TestTmdbToTvdbWithHintsEpisodeIDIsAuthoritative pins that an episode id needs no
-// numbering: it resolves even when the numbers would map elsewhere, because the
-// id is order-independent.
+// numbering: it resolves even where the caller's numbers would place a different
+// episode.
 func TestTmdbToTvdbWithHintsEpisodeIDIsAuthoritative(t *testing.T) {
 	m := futuramaMapper(t)
 
@@ -475,7 +524,8 @@ func TestTmdbToTvdbWithHintsEpisodeIDIsAuthoritative(t *testing.T) {
 		t.Fatalf("got id %d via %q, want 8234611 via episode_id", got.TVDBEpisodeID, got.MatchedBy)
 	}
 	if got.TVDBSeason != 6 || got.TVDBEpisode != 1 {
-		t.Fatalf("got coordinates s%de%d, want s6e1 in the alternate order", got.TVDBSeason, got.TVDBEpisode)
+		t.Fatalf("got coordinates s%de%d, want s6e1 in the alternate order",
+			got.TVDBSeason, got.TVDBEpisode)
 	}
 }
 
@@ -490,6 +540,23 @@ func TestTmdbToTvdbWithHintsRejectsUnknownOrder(t *testing.T) {
 		t.Fatalf("want an EpisodeHintError on tvdb_order, got %v", err)
 	}
 }
+
+// TestTmdbToTvdbWithHintsEpisodeIDOutsideOrder pins that an id the named order
+// does not contain is a contradiction, not a silent success.
+func TestTmdbToTvdbWithHintsEpisodeIDOutsideOrder(t *testing.T) {
+	m := futuramaMapper(t)
+
+	_, err := m.TmdbToTvdbWithHints(context.Background(), 615, 6, 1, EpisodeHints{
+		TVDBOrder:     "alternate",
+		TVDBEpisodeID: 1111111, // in no order
+	})
+	var hintErr *EpisodeHintError
+	if !errors.As(err, &hintErr) || hintErr.Field != "tvdb_episode_id" {
+		t.Fatalf("want an EpisodeHintError on tvdb_episode_id, got %v", err)
+	}
+}
+
+// --- pagination (plan task 0.0d) --------------------------------------------
 
 // TestFetchOrderEpisodesPagesPastTheFirstPage pins the 500-episode page limit.
 // Reading only page 0 makes every long-running series look truncated, which turns
@@ -523,8 +590,83 @@ func TestFetchOrderEpisodesPagesPastTheFirstPage(t *testing.T) {
 	if len(got) != total {
 		t.Fatalf("got %d episodes, want %d -- the list was truncated at the page boundary", len(got), total)
 	}
-	// The last episode sits on page 3 and must be reachable.
 	if findEpisodeByID(got, int64(900000+total-1)) == nil {
 		t.Fatal("could not find the final episode; pages beyond the first were not read")
+	}
+}
+
+// --- the real Bleach case ---------------------------------------------------
+//
+// Bleach is the measured case where the same coordinates name completely
+// different episodes: TMDB 30984 S2E1 is "The Blood Warfare" (2022-10-11), while
+// TVDB 74796 default s2e1 is "突入！死神の世界" (2005-03-01). TMDB's S2 is the 2022
+// revival; TVDB files those episodes at s17.
+//
+// This is why "no evidence" must not become "same numbers, close enough": the
+// removed fallback would have answered a 2022 question with a 2005 episode.
+
+func bleachMapper() *Mapper {
+	return &Mapper{
+		tvdb: &fakeTVDB{
+			seriesByID: map[int]*tvdb.SeriesBaseRecord{74796: {ID: 74796, Name: "Bleach"}},
+			seriesByTMDB: map[int]*tvdb.SeriesBaseRecord{
+				30984: {ID: 74796, Name: "Bleach"},
+			},
+			episodes: map[int]map[string][]tvdb.EpisodeBaseRecord{
+				74796: {"default": {
+					{ID: 600001, Name: "突入！死神の世界", Aired: "2005-03-01", SeriesID: 74796, SeasonNumber: 2, Number: 1},
+					{ID: 600002, Name: "THE BLOOD WARFARE", Aired: "2022-10-11", SeriesID: 74796, SeasonNumber: 17, Number: 1},
+				}},
+			},
+		},
+		tmdb: &fakeTMDB{
+			details: map[string]*tmdb.EpisodeDetails{
+				"30984/2/1": {ID: 800001, Name: "The Blood Warfare", AirDate: "2022-10-11", SeasonNumber: 2, EpisodeNumber: 1},
+				// An episode whose air date is absent from the order and whose
+				// name is localized on the TVDB side: no evidence places it.
+				"30984/2/9": {ID: 800009, Name: "The Blade and Me", AirDate: "2022-12-06", SeasonNumber: 2, EpisodeNumber: 9},
+			},
+			names:  map[int]string{30984: "Bleach"},
+			tvdbID: map[int]int{30984: 74796},
+		},
+		tvdbSeasonType:      "default",
+		fallbackSeasonTypes: defaultFallbackSeasonTypes,
+		maxTVDBPages:        200,
+		maxTMDBSeasons:      300,
+	}
+}
+
+// TestBleachAirDateFindsTheRightEpisode is the positive control for the case
+// above: the air date places the 2022 episode at TVDB s17e1, not s2e1.
+func TestBleachAirDateFindsTheRightEpisode(t *testing.T) {
+	m := bleachMapper()
+
+	got, err := m.TmdbToTvdb(context.Background(), 30984, 2, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TVDBEpisodeID != 600002 || got.TVDBSeason != 17 {
+		t.Fatalf("got episode %d at s%de%d, want 600002 at s17e1",
+			got.TVDBEpisodeID, got.TVDBSeason, got.TVDBEpisode)
+	}
+}
+
+// TestBleachDoesNotLeakTheOldEpisodeOntoNewCoordinates pins the failure the
+// fallback caused: when the evidence places nothing, the mapper must not answer
+// with the 2005 episode that happens to share the caller's numbers.
+//
+// (The opt-in behaviour of the removed fallback is covered by
+// TestTmdbToTvdbCoordinateFallbackIsOptIn, where a same-coordinate episode
+// genuinely exists to be returned.)
+func TestBleachDoesNotLeakTheOldEpisodeOntoNewCoordinates(t *testing.T) {
+	m := bleachMapper()
+
+	got, err := m.TmdbToTvdb(context.Background(), 30984, 2, 9)
+	if err == nil {
+		t.Fatalf("expected an honest failure; got episode %q at s%de%d via %q",
+			got.TVDBEpisodeName, got.TVDBSeason, got.TVDBEpisode, got.MatchedBy)
+	}
+	if !strings.Contains(err.Error(), "unable to map") {
+		t.Fatalf("want an 'unable to map' error, got %v", err)
 	}
 }
