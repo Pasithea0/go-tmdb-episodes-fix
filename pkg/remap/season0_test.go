@@ -182,3 +182,27 @@ func TestTitlesMatch(t *testing.T) {
 		}
 	}
 }
+
+// TestTvdbToTmdbFallsThroughAStaleRemoteID pins the third failure found while
+// verifying season 0 live. TVDB's remote ids for the Futurama specials point at
+// TMDB episode ids that no longer exist -- S0E5 "Bender's Game" carries 13253,
+// which 404s. The mapper returned that error, refusing a question the name and
+// air date settle exactly.
+//
+// A dead pointer is not evidence that an episode cannot be mapped.
+func TestTvdbToTmdbFallsThroughAStaleRemoteID(t *testing.T) {
+	m := seasonZeroMapper()
+
+	got, err := m.TvdbToTmdbWithHints(context.Background(), 73871, 0, 5, EpisodeHints{})
+	if err != nil {
+		t.Fatalf("a stale remote id must not abort the mapping: %v", err)
+	}
+	if got.TMDBEpisodeID != 35105 || got.TMDBSeason != 0 || got.TMDBEpisode != 5 {
+		t.Fatalf("got TMDB s%de%d (id %d), want s0e5 id 35105",
+			got.TMDBSeason, got.TMDBEpisode, got.TMDBEpisodeID)
+	}
+	if got.MatchedBy != "name_scan" {
+		t.Fatalf("got matched_by %q, want %q (resolved by evidence, not by the dead id)",
+			got.MatchedBy, "name_scan")
+	}
+}

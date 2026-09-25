@@ -10,9 +10,9 @@ func TestDedupeMismatchItems_MergesSegments(t *testing.T) {
 		{ImdbID: "tt0434665", Season: 14, Episode: 19, Title: "Bleach", Segment: "intro"},
 		{ImdbID: "tt0434665", Season: 14, Episode: 19, Title: "Bleach", Segment: "credits"},
 		{ImdbID: "tt5607616", Season: 3, Episode: 4, Title: "Re:ZERO", Segment: "credits"},
-		{ImdbID: "", Season: 3, Episode: 4, Title: "no imdb id"},           // dropped
-		{ImdbID: "tt5607616", Season: 0, Episode: 4, Title: "no season"},   // dropped
-		{ImdbID: "tt5607616", Season: 3, Episode: 0, Title: "no episode"},  // dropped
+		{ImdbID: "", Season: 3, Episode: 4, Title: "no imdb id"},          // dropped
+		{ImdbID: "tt5607616", Season: 0, Episode: 4, Title: "no season"},  // dropped
+		{ImdbID: "tt5607616", Season: 3, Episode: 0, Title: "no episode"}, // dropped
 	}
 
 	rows := dedupeMismatchItems(items)

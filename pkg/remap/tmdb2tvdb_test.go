@@ -50,6 +50,14 @@ type fakeTVDB struct {
 	// seriesByID backs GetSeriesExtended, used to read a series name when
 	// corroborating a link.
 	seriesByID map[int]*tvdb.SeriesBaseRecord
+	// seriesRemoteIDs backs the series-level remote ids on GetSeriesExtended,
+	// which is how the tvdb2tmdb direction learns the TMDB series id.
+	seriesRemoteIDs map[int][]tvdb.RemoteID
+	// episodeRemoteIDs backs the remote ids on GetEpisodeExtended, which is how
+	// that direction learns the TMDB episode id. TVDB's values here go stale --
+	// the Futurama specials point at TMDB ids that no longer exist -- so the
+	// path has to tolerate a dead one.
+	episodeRemoteIDs map[int64][]tvdb.RemoteID
 
 	lookupUsed string
 }
@@ -77,14 +85,26 @@ func (f *fakeTVDB) FindSeriesByTMDBID(_ context.Context, tmdbID int) (*tvdb.Seri
 
 func (f *fakeTVDB) GetSeriesExtended(_ context.Context, seriesID int) (*tvdb.SeriesExtendedRecord, error) {
 	if s, ok := f.seriesByID[seriesID]; ok {
-		return &tvdb.SeriesExtendedRecord{ID: s.ID, Name: s.Name}, nil
+		return &tvdb.SeriesExtendedRecord{
+			ID:        s.ID,
+			Name:      s.Name,
+			RemoteIDs: f.seriesRemoteIDs[seriesID],
+		}, nil
 	}
 	return nil, fmt.Errorf("no tvdb series %d", seriesID)
 }
 
 func (f *fakeTVDB) GetEpisodeExtended(_ context.Context, id int64) (*tvdb.EpisodeExtendedRecord, error) {
 	if ep, ok := f.episodesByID[id]; ok {
-		return &tvdb.EpisodeExtendedRecord{ID: ep.ID, Name: ep.Name, Aired: ep.Aired}, nil
+		return &tvdb.EpisodeExtendedRecord{
+			ID:           ep.ID,
+			Name:         ep.Name,
+			Aired:        ep.Aired,
+			SeriesID:     ep.SeriesID,
+			SeasonNumber: ep.SeasonNumber,
+			Number:       ep.Number,
+			RemoteIDs:    f.episodeRemoteIDs[id],
+		}, nil
 	}
 	return nil, fmt.Errorf("no tvdb episode %d", id)
 }
@@ -133,6 +153,8 @@ type fakeTMDB struct {
 	tvdbID  map[int]int                     // external_ids route
 	// seasons backs GetSeasonEpisodes, keyed "series/season".
 	seasons map[string][]tmdb.SeasonEpisode
+	// episodesByID backs GetEpisodeByID.
+	episodesByID map[int]*tmdb.EpisodeByID
 }
 
 func (f *fakeTMDB) GetEpisodeDetails(_ context.Context, tvID, season, episode int) (*tmdb.EpisodeDetails, error) {
@@ -142,7 +164,14 @@ func (f *fakeTMDB) GetEpisodeDetails(_ context.Context, tvID, season, episode in
 	return nil, fmt.Errorf("no tmdb episode %d s%de%d", tvID, season, episode)
 }
 
-func (f *fakeTMDB) GetEpisodeByID(context.Context, int) (*tmdb.EpisodeByID, error) { return nil, nil }
+// GetEpisodeByID models TMDB 404ing on an episode id that no longer exists,
+// which is what TVDB's stale remote ids for the Futurama specials hit.
+func (f *fakeTMDB) GetEpisodeByID(_ context.Context, episodeID int) (*tmdb.EpisodeByID, error) {
+	if ep, ok := f.episodesByID[episodeID]; ok {
+		return ep, nil
+	}
+	return nil, fmt.Errorf("tmdb episode %d not found", episodeID)
+}
 
 func (f *fakeTMDB) GetTVDetails(_ context.Context, tvID int) (*tmdb.TVDetails, error) {
 	name, ok := f.names[tvID]
@@ -219,6 +248,17 @@ func futuramaTVDB() *fakeTVDB {
 			427447:  {ID: 427447, Name: "Futurama: Into the Wild Green Yonder", Aired: "2009-02-24", SeasonNumber: 0, Number: 6},
 			1051911: {ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeasonNumber: 6, Number: 1},
 			8234611: {ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeasonNumber: 6, Number: 1},
+		},
+		// Series-level remote id, as TVDB really carries it.
+		seriesRemoteIDs: map[int][]tvdb.RemoteID{
+			73871: {{ID: "615", SourceName: "moviedb"}},
+		},
+		// Episode-level remote ids. 395236 (S0E5 "Bender's Game") points at TMDB
+		// episode 13253, which no longer exists -- read from live TVDB and
+		// confirmed as a 404 on 2026-09-25. This is the stale pointer the mapper
+		// must survive.
+		episodeRemoteIDs: map[int64][]tvdb.RemoteID{
+			395236: {{ID: "13253", SourceName: "moviedb"}},
 		},
 		lookupUsed: "tmdb",
 	}
