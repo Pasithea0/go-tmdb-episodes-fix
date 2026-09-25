@@ -271,6 +271,137 @@ func (m *Mapper) TmdbToTvdbInOrder(ctx context.Context, tmdbSeriesID int, season
 		"set AllowCoordinateIdentityFallback to opt in)", tmdbSeriesID, season, episode, normalizedOrder)
 }
 
+// TmdbToTvdbWithHints maps a TMDB coordinate to TVDB using what the caller
+// already knows, strongest evidence first.
+//
+// Precedence, and why:
+//  1. TVDBEpisodeID -- TVDB episode ids are unique across every order, so an id
+//     identifies the episode with no numbering involved. It is checked against
+//     the named order and against EpisodeName; a conflict is an EpisodeHintError
+//     rather than a silent pick.
+//  2. Air date within the named order, then the episode name.
+//  3. Nothing. Coordinate identity is never assumed (see TmdbToTvdbInOrder).
+//
+// hints.TVDBOrder names the order the caller's numbers belong to. It matters:
+// the same numbers name different episodes in different orders.
+func (m *Mapper) TmdbToTvdbWithHints(ctx context.Context, tmdbSeriesID int, season int, episode int, hints EpisodeHints) (*TmdbToTvdbResult, error) {
+	if m.tmdb == nil {
+		return nil, errors.New("tmdb bearer token is required for tmdb->tvdb mapping")
+	}
+
+	order := strings.TrimSpace(hints.TVDBOrder)
+	if order == "" {
+		order = m.tvdbSeasonType
+	}
+	normalizedOrder, ok := NormalizeTVDBOrder(order)
+	if !ok {
+		return nil, &EpisodeHintError{Field: "tvdb_order", Detail: fmt.Sprintf("unknown tvdb order %q", hints.TVDBOrder)}
+	}
+
+	// 1. An episode id is authoritative -- it needs no numbering to be correct.
+	if hints.TVDBEpisodeID != 0 {
+		series, _, err := m.resolveVerifiedTVDBSeries(ctx, tmdbSeriesID)
+		if err != nil {
+			return nil, err
+		}
+		episodes, err := m.fetchOrderEpisodes(ctx, series.ID, normalizedOrder)
+		if err != nil {
+			return nil, err
+		}
+		found := findEpisodeByID(episodes, hints.TVDBEpisodeID)
+		if found == nil {
+			return nil, &EpisodeHintError{
+				Field: "tvdb_episode_id",
+				Detail: fmt.Sprintf("episode %d is not in the %q order for tvdb series %d",
+					hints.TVDBEpisodeID, normalizedOrder, series.ID),
+			}
+		}
+		if hints.EpisodeName != "" && episodeNameMatch(hints.EpisodeName, found.Name) == NameMatchMismatch {
+			return nil, &EpisodeHintError{
+				Field:  "episode_name",
+				Detail: fmt.Sprintf("episode %d is %q but the caller said %q", found.ID, found.Name, hints.EpisodeName),
+			}
+		}
+		return tmdbToTvdbResult(tmdbSeriesID, season, episode, series.ID, *found, "episode_id", "verified:"+normalizedOrder), nil
+	}
+
+	// 2. Evidence: air date, then name.
+	result, err := m.TmdbToTvdbInOrder(ctx, tmdbSeriesID, season, episode, normalizedOrder)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Corroborate whichever episode the evidence produced. A supplied title
+	//    that contradicts the match means the caller and the mapper are talking
+	//    about different episodes; picking one silently is how wrong data lands
+	//    in the library.
+	if hints.EpisodeName != "" {
+		switch episodeNameMatch(hints.EpisodeName, result.TVDBEpisodeName) {
+		case NameMatchMatch:
+			result.MatchedBy += "+name"
+		case NameMatchMismatch:
+			return nil, &EpisodeHintError{
+				Field: "episode_name",
+				Detail: fmt.Sprintf("resolved to %q (%d) but the caller said %q",
+					result.TVDBEpisodeName, result.TVDBEpisodeID, hints.EpisodeName),
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// tmdbToTvdbResult builds a result record. Kept in one place so every branch
+// reports the same provenance fields.
+func tmdbToTvdbResult(
+	tmdbSeriesID, season, episode, tvdbSeriesID int,
+	ep tvdb.EpisodeBaseRecord, matchedBy, lookup string,
+) *TmdbToTvdbResult {
+	return &TmdbToTvdbResult{
+		InputTMDBSeriesID: tmdbSeriesID,
+		InputSeason:       season,
+		InputEpisode:      episode,
+		TVDBSeriesID:      tvdbSeriesID,
+		TVDBEpisodeID:     ep.ID,
+		TVDBSeason:        ep.SeasonNumber,
+		TVDBEpisode:       ep.Number,
+		TVDBEpisodeName:   ep.Name,
+		MatchedBy:         matchedBy,
+		TVDBSeriesLookup:  lookup,
+	}
+}
+
+// findEpisodeByID returns the episode with the given id, or nil.
+func findEpisodeByID(episodes []tvdb.EpisodeBaseRecord, id int64) *tvdb.EpisodeBaseRecord {
+	for i := range episodes {
+		if episodes[i].ID == id {
+			return &episodes[i]
+		}
+	}
+	return nil
+}
+
+// fetchOrderEpisodes returns a complete episode list for one order.
+//
+// It pages to exhaustion deliberately: TVDB returns at most 500 episodes per
+// page (measured: One Piece 500/500/242), so reading only page 0 silently
+// truncates every long-running series -- and a truncated list makes callers
+// reject episodes that do exist.
+func (m *Mapper) fetchOrderEpisodes(ctx context.Context, seriesID int, order string) ([]tvdb.EpisodeBaseRecord, error) {
+	var all []tvdb.EpisodeBaseRecord
+	for page := 0; page < m.maxTVDBPages; page++ {
+		batch, err := m.tvdb.GetSeriesEpisodes(ctx, seriesID, order, page, nil, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			return all, nil
+		}
+		all = append(all, batch...)
+	}
+	return all, nil
+}
+
 // resolveVerifiedTVDBSeries returns the TVDB series for a TMDB series, refusing
 // any link whose name does not corroborate. The second return value names the
 // lookup route that produced the answer, for provenance.

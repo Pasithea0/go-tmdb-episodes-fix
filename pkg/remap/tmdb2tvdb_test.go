@@ -2,6 +2,7 @@ package remap
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -407,5 +408,123 @@ func TestTmdbToTvdbInOrderEmptyUsesConfiguredOrder(t *testing.T) {
 	}
 	if got.TVDBEpisodeName != "Space Pilot 3000" {
 		t.Fatalf("got %q, want %q", got.TVDBEpisodeName, "Space Pilot 3000")
+	}
+}
+
+// --- Task 0.0e --------------------------------------------------------------
+
+// TestTmdbToTvdbWithHintsAlternateConfirmedByTitle covers the intended use:
+// resolve in the alternate order, then confirm with the episode title before
+// accepting the answer.
+func TestTmdbToTvdbWithHintsAlternateConfirmedByTitle(t *testing.T) {
+	m := futuramaMapper(t)
+
+	got, err := m.TmdbToTvdbWithHints(context.Background(), 615, 6, 1, EpisodeHints{
+		TVDBOrder:   "alternate",
+		EpisodeName: "Bender's Big Score (1)",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TVDBEpisodeID != 8234611 {
+		t.Fatalf("got episode id %d, want 8234611", got.TVDBEpisodeID)
+	}
+	if got.MatchedBy != "air_date+name" {
+		t.Fatalf("got matched_by %q, want %q (the title confirmed the date match)",
+			got.MatchedBy, "air_date+name")
+	}
+}
+
+// TestTmdbToTvdbWithHintsRejectsContradictingTitle is the guard the user asked
+// for: the numbers resolve, but the title says otherwise, so the answer is
+// refused rather than accepted on numbering alone.
+func TestTmdbToTvdbWithHintsRejectsContradictingTitle(t *testing.T) {
+	m := futuramaMapper(t)
+
+	_, err := m.TmdbToTvdbWithHints(context.Background(), 615, 6, 1, EpisodeHints{
+		TVDBOrder:   "alternate",
+		EpisodeName: "Rebirth", // actually TVDB default S6E1
+	})
+	if err == nil {
+		t.Fatal("accepted a match whose title contradicts the caller")
+	}
+	var hintErr *EpisodeHintError
+	if !errors.As(err, &hintErr) {
+		t.Fatalf("want an *EpisodeHintError, got %T: %v", err, err)
+	}
+	if hintErr.Field != "episode_name" {
+		t.Fatalf("got field %q, want %q", hintErr.Field, "episode_name")
+	}
+}
+
+// TestTmdbToTvdbWithHintsEpisodeIDIsAuthoritative pins that an episode id needs no
+// numbering: it resolves even when the numbers would map elsewhere, because the
+// id is order-independent.
+func TestTmdbToTvdbWithHintsEpisodeIDIsAuthoritative(t *testing.T) {
+	m := futuramaMapper(t)
+
+	got, err := m.TmdbToTvdbWithHints(context.Background(), 615, 6, 1, EpisodeHints{
+		TVDBOrder:     "alternate",
+		TVDBEpisodeID: 8234611,
+		EpisodeName:   "Bender's Big Score (1)",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TVDBEpisodeID != 8234611 || got.MatchedBy != "episode_id" {
+		t.Fatalf("got id %d via %q, want 8234611 via episode_id", got.TVDBEpisodeID, got.MatchedBy)
+	}
+	if got.TVDBSeason != 6 || got.TVDBEpisode != 1 {
+		t.Fatalf("got coordinates s%de%d, want s6e1 in the alternate order", got.TVDBSeason, got.TVDBEpisode)
+	}
+}
+
+// TestTmdbToTvdbWithHintsRejectsUnknownOrder pins that a typo cannot silently
+// resolve in the wrong order.
+func TestTmdbToTvdbWithHintsRejectsUnknownOrder(t *testing.T) {
+	m := futuramaMapper(t)
+
+	_, err := m.TmdbToTvdbWithHints(context.Background(), 615, 1, 1, EpisodeHints{TVDBOrder: "season2"})
+	var hintErr *EpisodeHintError
+	if !errors.As(err, &hintErr) || hintErr.Field != "tvdb_order" {
+		t.Fatalf("want an EpisodeHintError on tvdb_order, got %v", err)
+	}
+}
+
+// TestFetchOrderEpisodesPagesPastTheFirstPage pins the 500-episode page limit.
+// Reading only page 0 makes every long-running series look truncated, which turns
+// real episodes into "does not exist" rejections. One Piece really returns
+// 500/500/242.
+func TestFetchOrderEpisodesPagesPastTheFirstPage(t *testing.T) {
+	const total = 1242
+	episodes := make([]tvdb.EpisodeBaseRecord, 0, total)
+	for i := 0; i < total; i++ {
+		episodes = append(episodes, tvdb.EpisodeBaseRecord{
+			ID:           int64(900000 + i),
+			Name:         fmt.Sprintf("Episode %d", i+1),
+			SeriesID:     81797,
+			SeasonNumber: 1,
+			Number:       i + 1,
+		})
+	}
+	m := &Mapper{
+		tvdb: &fakeTVDB{
+			seriesByID: map[int]*tvdb.SeriesBaseRecord{81797: {ID: 81797, Name: "One Piece"}},
+			episodes:   map[int]map[string][]tvdb.EpisodeBaseRecord{81797: {"default": episodes}},
+		},
+		tvdbSeasonType: "default",
+		maxTVDBPages:   200,
+	}
+
+	got, err := m.fetchOrderEpisodes(context.Background(), 81797, "default")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != total {
+		t.Fatalf("got %d episodes, want %d -- the list was truncated at the page boundary", len(got), total)
+	}
+	// The last episode sits on page 3 and must be reachable.
+	if findEpisodeByID(got, int64(900000+total-1)) == nil {
+		t.Fatal("could not find the final episode; pages beyond the first were not read")
 	}
 }
