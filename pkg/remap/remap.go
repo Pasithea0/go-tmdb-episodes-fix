@@ -48,6 +48,7 @@ type tmdbAPI interface {
 	GetEpisodeDetails(ctx context.Context, tvID int, season int, episode int) (*tmdb.EpisodeDetails, error)
 	GetEpisodeByID(ctx context.Context, episodeID int) (*tmdb.EpisodeByID, error)
 	GetTVDetails(ctx context.Context, tvID int) (*tmdb.TVDetails, error)
+	GetTvdbIDFromTmdbID(ctx context.Context, tvID int) (int, error)
 	GetEpisodeGroups(ctx context.Context, tvID int) ([]tmdb.EpisodeGroup, error)
 	GetEpisodeGroup(ctx context.Context, groupID string) (*tmdb.EpisodeGroupDetail, error)
 	GetSeasonEpisodes(ctx context.Context, tvID int, season int) ([]tmdb.SeasonEpisode, error)
@@ -131,7 +132,10 @@ func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, e
 		return nil, errors.New("tmdb bearer token is required for tmdb->tvdb mapping")
 	}
 
-	tvdbSeries, lookupUsed, err := m.tvdb.FindSeriesByTMDBID(ctx, tmdbSeriesID)
+	// The series must be verified, not merely found by id: TVDB's bare-number
+	// remote-id search can return a different series entirely (see
+	// resolveVerifiedTVDBSeries).
+	tvdbSeries, lookupUsed, err := m.resolveVerifiedTVDBSeries(ctx, tmdbSeriesID)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +248,66 @@ func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, e
 	return nil, fmt.Errorf("unable to map tmdb %d s%de%d to tvdb: no tvdb episode matched by "+
 		"air date or name in the %q order (coordinate identity is not assumed; "+
 		"set AllowCoordinateIdentityFallback to opt in)", tmdbSeriesID, season, episode, m.tvdbSeasonType)
+}
+
+// resolveVerifiedTVDBSeries returns the TVDB series for a TMDB series, refusing
+// any link whose name does not corroborate. The second return value names the
+// lookup route that produced the answer, for provenance.
+//
+// TVDB's /search/remoteid indexes a bare number across every id namespace, so a
+// number that is a valid TMDB id can collide with some other show's id.
+// Measured 2026-09-25: TMDB 1433 ("American Dad!") resolves through that search
+// to TVDB series 84070, "War and Remembrance", a 1988 WWII miniseries. Using the
+// id without checking the name would relabel every American Dad submission onto
+// a different series, silently.
+//
+// TMDB is asked first: its external_ids mapping was correct in 5 of 5 measured
+// cases, including the case TVDB's own search gets wrong. It is still checked,
+// because that field is user-contributed and can itself go stale.
+func (m *Mapper) resolveVerifiedTVDBSeries(ctx context.Context, tmdbSeriesID int) (*tvdb.SeriesBaseRecord, string, error) {
+	tmdbName := ""
+	if details, err := m.tmdb.GetTVDetails(ctx, tmdbSeriesID); err == nil && details != nil {
+		tmdbName = details.Name
+	}
+	if strings.TrimSpace(tmdbName) == "" {
+		return nil, "", fmt.Errorf("cannot verify a tvdb series for tmdb id %d: no tmdb series name to check against", tmdbSeriesID)
+	}
+
+	// 1. TMDB's own external_ids mapping.
+	if tvdbID, err := m.tmdb.GetTvdbIDFromTmdbID(ctx, tmdbSeriesID); err == nil && tvdbID != 0 {
+		if series, err := m.tvdb.GetSeriesExtended(ctx, tvdbID); err == nil && series != nil &&
+			namesCorroborate(tmdbName, series.Name) {
+			return &tvdb.SeriesBaseRecord{ID: series.ID, Name: series.Name}, "tmdb_external_ids", nil
+		}
+	}
+
+	// 2. TVDB's prefixed searches only. The bare-number form is the one that
+	//    collides, so it is never used as a fallback here.
+	for _, form := range []string{
+		fmt.Sprintf("tmdb-%d", tmdbSeriesID),
+		fmt.Sprintf("tmdb:%d", tmdbSeriesID),
+		fmt.Sprintf("themoviedb-%d", tmdbSeriesID),
+		fmt.Sprintf("themoviedb:%d", tmdbSeriesID),
+	} {
+		series, err := m.tvdb.SearchSeriesByRemoteID(ctx, form)
+		if err != nil || series == nil {
+			continue
+		}
+		if namesCorroborate(tmdbName, series.Name) {
+			return series, "tvdb_search:" + form, nil
+		}
+	}
+
+	return nil, "unverified", fmt.Errorf("no verified tvdb series for tmdb %d: no candidate whose title matches %q (an id match alone is not a mapping)", tmdbSeriesID, tmdbName)
+}
+
+// namesCorroborate reports whether two series names are the same title.
+// Deliberately tolerant of case and punctuation, deliberately intolerant of
+// everything else: this is a wrong-link check, not a fuzzy matcher, and a
+// near-miss here means a different show.
+func namesCorroborate(a, b string) bool {
+	na, nb := normalizeName(a), normalizeName(b)
+	return na != "" && na == nb
 }
 
 type TvdbToTmdbResult struct {

@@ -26,6 +26,9 @@ type fakeTVDB struct {
 	episodes map[int]map[string][]tvdb.EpisodeBaseRecord
 	// episodesByID indexes the same records by episode id.
 	episodesByID map[int64]tvdb.EpisodeBaseRecord
+	// seriesByID backs GetSeriesExtended, used to read a series' name when
+	// corroborating a link.
+	seriesByID map[int]*tvdb.SeriesBaseRecord
 
 	lookupUsed string
 }
@@ -51,8 +54,11 @@ func (f *fakeTVDB) FindSeriesByTMDBID(_ context.Context, tmdbID int) (*tvdb.Seri
 	return nil, "", fmt.Errorf("no tvdb series for tmdb id %d", tmdbID)
 }
 
-func (f *fakeTVDB) GetSeriesExtended(context.Context, int) (*tvdb.SeriesExtendedRecord, error) {
-	return nil, nil
+func (f *fakeTVDB) GetSeriesExtended(_ context.Context, seriesID int) (*tvdb.SeriesExtendedRecord, error) {
+	if s, ok := f.seriesByID[seriesID]; ok {
+		return &tvdb.SeriesExtendedRecord{ID: s.ID, Name: s.Name}, nil
+	}
+	return nil, fmt.Errorf("no tvdb series %d", seriesID)
 }
 
 func (f *fakeTVDB) GetEpisodeExtended(_ context.Context, id int64) (*tvdb.EpisodeExtendedRecord, error) {
@@ -131,6 +137,14 @@ func (f *fakeTMDB) GetEpisodeGroups(context.Context, int) ([]tmdb.EpisodeGroup, 
 func (f *fakeTMDB) GetEpisodeGroup(context.Context, string) (*tmdb.EpisodeGroupDetail, error) {
 	return nil, nil
 }
+
+// GetTvdbIDFromTmdbID models TMDB's external_ids route.
+func (f *fakeTMDB) GetTvdbIDFromTmdbID(_ context.Context, tvID int) (int, error) {
+	if id, ok := f.tvdbID[tvID]; ok {
+		return id, nil
+	}
+	return 0, nil
+}
 func (f *fakeTMDB) GetSeasonEpisodes(context.Context, int, int) ([]tmdb.SeasonEpisode, error) {
 	return nil, nil
 }
@@ -167,6 +181,9 @@ func futuramaMapper(t *testing.T) *Mapper {
 			episodesByID: map[int64]tvdb.EpisodeBaseRecord{
 				1051911: {ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeasonNumber: 6, Number: 1},
 				8234611: {ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeasonNumber: 6, Number: 1},
+			},
+			seriesByID: map[int]*tvdb.SeriesBaseRecord{
+				73871: {ID: 73871, Name: "Futurama"},
 			},
 			lookupUsed: "tmdb",
 		},
@@ -239,5 +256,109 @@ func TestTmdbToTvdbCoordinateFallbackIsOptIn(t *testing.T) {
 	if got.MatchedBy != "assumed_same_coordinates" {
 		t.Fatalf("got matched_by %q; an assumption must never be reported as a match",
 			got.MatchedBy)
+	}
+}
+
+// --- Task 0.0b --------------------------------------------------------------
+//
+// TMDB 1433 is "American Dad!". TVDB's bare-number remote-id search answers with
+// series 84070 "War and Remembrance", a 1988 WWII miniseries, because the search
+// indexes a bare number across every id namespace. Measured live 2026-09-25.
+// TMDB's own external_ids correctly gives 73141.
+
+func americanDadMapper(t *testing.T, withExternalIDs bool) *Mapper {
+	t.Helper()
+	external := map[int]int{}
+	if withExternalIDs {
+		external[1433] = 73141
+	}
+	return &Mapper{
+		tvdb: &fakeTVDB{
+			seriesByTMDB: map[int]*tvdb.SeriesBaseRecord{
+				1433: {ID: 84070, Name: "War and Remembrance"},
+			},
+			// The prefixed forms returned nothing when measured; only the bare
+			// number resolves, and it resolves wrong.
+			seriesByRemote: map[string]*tvdb.SeriesBaseRecord{},
+			seriesByID: map[int]*tvdb.SeriesBaseRecord{
+				73141: {ID: 73141, Name: "American Dad!"},
+				84070: {ID: 84070, Name: "War and Remembrance"},
+			},
+			episodes: map[int]map[string][]tvdb.EpisodeBaseRecord{
+				73141: {"default": {
+					{ID: 5001, Name: "Pilot", Aired: "2005-02-06", SeriesID: 73141, SeasonNumber: 1, Number: 1},
+				}},
+				84070: {"default": {
+					{ID: 5002, Name: "Part I: December 15-27, 1941", Aired: "1988-11-13", SeriesID: 84070, SeasonNumber: 1, Number: 1},
+				}},
+			},
+			lookupUsed: "tvdb",
+		},
+		tmdb: &fakeTMDB{
+			details: map[string]*tmdb.EpisodeDetails{
+				"1433/1/1": {ID: 700001, Name: "Pilot", AirDate: "2005-02-06", SeasonNumber: 1, EpisodeNumber: 1},
+			},
+			names:  map[int]string{1433: "American Dad!"},
+			tvdbID: external,
+		},
+		tvdbSeasonType:      "default",
+		fallbackSeasonTypes: defaultFallbackSeasonTypes,
+		maxTVDBPages:        200,
+		maxTMDBSeasons:      300,
+	}
+}
+
+// TestTmdbToTvdbPrefersVerifiedExternalIDs pins that TMDB's external_ids wins and
+// is accepted only because its name corroborates.
+func TestTmdbToTvdbPrefersVerifiedExternalIDs(t *testing.T) {
+	m := americanDadMapper(t, true)
+
+	got, err := m.TmdbToTvdb(context.Background(), 1433, 1, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TVDBSeriesID != 73141 {
+		t.Fatalf("resolved tvdb series %d, want 73141 (American Dad!); "+
+			"84070 is War and Remembrance and must never be chosen", got.TVDBSeriesID)
+	}
+	if got.TVDBEpisodeName != "Pilot" {
+		t.Fatalf("got episode %q, want %q", got.TVDBEpisodeName, "Pilot")
+	}
+}
+
+// TestTmdbToTvdbRejectsUnverifiedSeries pins that an id match alone is not a
+// mapping: with no external_ids available the search returns a series with a
+// different name, and the mapper must refuse rather than relabel American Dad
+// submissions as War and Remembrance.
+func TestTmdbToTvdbRejectsUnverifiedSeries(t *testing.T) {
+	m := americanDadMapper(t, false)
+
+	got, err := m.TmdbToTvdb(context.Background(), 1433, 1, 1)
+	if err == nil {
+		t.Fatalf("accepted an unverified series link: tvdb %d %q",
+			got.TVDBSeriesID, got.TVDBEpisodeName)
+	}
+	if !strings.Contains(err.Error(), "verified") {
+		t.Fatalf("want a verification failure, got %v", err)
+	}
+}
+
+func TestNamesCorroborate(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"American Dad!", "American Dad!", true},
+		{"american dad", "American Dad!", true},
+		{"Futurama", "Futurama", true},
+		{"American Dad!", "War and Remembrance", false},
+		{"Futurama", "Futurama (1999)", false}, // year suffix is not stripped
+		{"", "Futurama", false},
+		{"Futurama", "", false},
+	}
+	for _, c := range cases {
+		if got := namesCorroborate(c.a, c.b); got != c.want {
+			t.Fatalf("namesCorroborate(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
 	}
 }

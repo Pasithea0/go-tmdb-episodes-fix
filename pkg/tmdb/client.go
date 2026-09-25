@@ -172,6 +172,24 @@ func (c *Client) GetTVDetails(ctx context.Context, tvID int) (*TVDetails, error)
 	return &TVDetails{Name: resp.Name, NumberOfSeasons: resp.NumberOfSeasons}, nil
 }
 
+// GetTvdbIDFromTmdbID reads TMDB's own external_ids mapping for a series.
+//
+// This is the reliable direction measured 2026-09-25: it was correct in 5/5 cases
+// tested, including American Dad (tmdb 1433 -> tvdb 73141), where TVDB's own
+// bare-number remote-id search returned series 84070 "War and Remembrance".
+// Note that TMDB's field is still user-contributed and can be stale or wrong, so
+// callers must corroborate the name of whatever series this points at.
+func (c *Client) GetTvdbIDFromTmdbID(ctx context.Context, tvID int) (int, error) {
+	path := "/tv/" + strconv.Itoa(tvID) + "/external_ids"
+	var resp struct {
+		TVDBID int `json:"tvdb_id"`
+	}
+	if err := c.doGet(ctx, path, nil, &resp); err != nil {
+		return 0, err
+	}
+	return resp.TVDBID, nil
+}
+
 type SeasonEpisode struct {
 	ID            int
 	EpisodeNumber int
