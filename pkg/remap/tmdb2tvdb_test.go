@@ -362,3 +362,50 @@ func TestNamesCorroborate(t *testing.T) {
 		}
 	}
 }
+
+// --- Task 0.0c --------------------------------------------------------------
+
+// TestTmdbToTvdbInOrderResolvesAlternate pins the whole point of naming an order:
+// the same TMDB coordinate resolves to different TVDB episodes depending on which
+// order is consulted. TMDB S6E1 aired 2008-03-23; under "alternate" that places it
+// at TVDB S6E1 "Bender's Big Score (1)", while "default" has no episode on that
+// date at all.
+func TestTmdbToTvdbInOrderResolvesAlternate(t *testing.T) {
+	m := futuramaMapper(t)
+
+	got, err := m.TmdbToTvdbInOrder(context.Background(), 615, 6, 1, "alternate")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TVDBEpisodeName != "Bender's Big Score (1)" {
+		t.Fatalf("got %q, want %q", got.TVDBEpisodeName, "Bender's Big Score (1)")
+	}
+	if got.TVDBEpisodeID != 8234611 {
+		t.Fatalf("got episode id %d, want 8234611", got.TVDBEpisodeID)
+	}
+}
+
+// TestTmdbToTvdbInOrderRejectsUnknownOrder pins that a typo'd order is an error
+// rather than a silent fallback to default -- silently answering in the wrong
+// order is the failure mode this whole change exists to remove.
+func TestTmdbToTvdbInOrderRejectsUnknownOrder(t *testing.T) {
+	m := futuramaMapper(t)
+
+	if _, err := m.TmdbToTvdbInOrder(context.Background(), 615, 1, 1, "bogus"); err == nil {
+		t.Fatal("expected an error for an unknown order")
+	}
+}
+
+// TestTmdbToTvdbInOrderEmptyUsesConfiguredOrder pins backward compatibility: an
+// empty order means "the mapper's configured order", not "no order".
+func TestTmdbToTvdbInOrderEmptyUsesConfiguredOrder(t *testing.T) {
+	m := futuramaMapper(t)
+
+	got, err := m.TmdbToTvdbInOrder(context.Background(), 615, 1, 1, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.TVDBEpisodeName != "Space Pilot 3000" {
+		t.Fatalf("got %q, want %q", got.TVDBEpisodeName, "Space Pilot 3000")
+	}
+}

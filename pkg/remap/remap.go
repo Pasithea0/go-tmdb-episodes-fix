@@ -127,9 +127,30 @@ type TmdbToTvdbResult struct {
 	TVDBSeriesLookup  string `json:"tvdb_series_lookup"`
 }
 
+// TmdbToTvdb maps a TMDB coordinate to TVDB within the mapper's configured order.
 func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, episode int) (*TmdbToTvdbResult, error) {
+	return m.TmdbToTvdbInOrder(ctx, tmdbSeriesID, season, episode, m.tvdbSeasonType)
+}
+
+// TmdbToTvdbInOrder maps a TMDB coordinate to TVDB within a named order.
+//
+// Prefer this over TmdbToTvdb, because the order is part of the answer: TVDB
+// coordinates only mean something inside one. Futurama (6,1) is "Rebirth" under
+// default and "Bender's Big Score (1)" under alternate -- two different episodes
+// with two different ids, and the same numbers for both.
+func (m *Mapper) TmdbToTvdbInOrder(ctx context.Context, tmdbSeriesID int, season int, episode int, order string) (*TmdbToTvdbResult, error) {
 	if m.tmdb == nil {
 		return nil, errors.New("tmdb bearer token is required for tmdb->tvdb mapping")
+	}
+
+	// An empty order means "whatever the mapper was configured with", so that
+	// callers who genuinely do not care keep the old single-argument behaviour.
+	if strings.TrimSpace(order) == "" {
+		order = m.tvdbSeasonType
+	}
+	normalizedOrder, ok := NormalizeTVDBOrder(order)
+	if !ok {
+		return nil, fmt.Errorf("unknown tvdb order %q", order)
 	}
 
 	// The series must be verified, not merely found by id: TVDB's bare-number
@@ -150,7 +171,7 @@ func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, e
 
 	if strings.TrimSpace(tmdbEp.AirDate) != "" {
 		airDate := tmdbEp.AirDate
-		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, m.tvdbSeasonType, 0, nil, nil, &airDate)
+		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, normalizedOrder, 0, nil, nil, &airDate)
 		if err != nil {
 			return nil, err
 		}
@@ -192,7 +213,7 @@ func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, e
 	if strings.TrimSpace(tmdbEp.Name) != "" {
 		wantName := tmdbEp.Name
 		for page := 0; page < m.maxTVDBPages; page++ {
-			eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, m.tvdbSeasonType, page, nil, nil, nil)
+			eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, normalizedOrder, page, nil, nil, nil)
 			if err != nil {
 				return nil, err
 			}
@@ -224,7 +245,7 @@ func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, e
 	// is labelled as an assumption so no caller can mistake it for evidence.
 	if m.allowCoordinateIdentityFallback {
 		s, e := season, episode
-		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, m.tvdbSeasonType, 0, &s, &e, nil)
+		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, normalizedOrder, 0, &s, &e, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -247,7 +268,7 @@ func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, e
 
 	return nil, fmt.Errorf("unable to map tmdb %d s%de%d to tvdb: no tvdb episode matched by "+
 		"air date or name in the %q order (coordinate identity is not assumed; "+
-		"set AllowCoordinateIdentityFallback to opt in)", tmdbSeriesID, season, episode, m.tvdbSeasonType)
+		"set AllowCoordinateIdentityFallback to opt in)", tmdbSeriesID, season, episode, normalizedOrder)
 }
 
 // resolveVerifiedTVDBSeries returns the TVDB series for a TMDB series, refusing
