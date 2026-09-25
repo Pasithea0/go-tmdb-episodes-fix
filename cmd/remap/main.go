@@ -31,6 +31,9 @@ func main() {
 		tvdbPin     = flag.String("tvdb-pin", getenv("TVDB_PIN"), "TVDB subscriber pin (or TVDB_PIN env var)")
 		tmdbToken   = flag.String("tmdb-token", getenv("TMDB_BEARER_TOKEN"), "TMDB bearer token (or TMDB_BEARER_TOKEN env var)")
 		seasonType  = flag.String("tvdb-season-type", "default", "TVDB season order (default, official, dvd, absolute, alternate, regional)")
+		tvdbOrder   = flag.String("tvdb-order", "", "episode hint: the order the season/episode numbers belong to (official, dvd, absolute, alternate, regional, altdvd, alttwo); used alone, without fallback")
+		episodeID   = flag.Int64("tvdb-episode-id", 0, "episode hint: TVDB episode id (unique across every order)")
+		episodeName = flag.String("episode-name", "", "episode hint: the episode title, used as corroboration")
 		batchSource = flag.String("mismatches", "", "batch mode: URL or file path of a feed-sync mismatches JSON ({items:[...]}); maps every unique imdb_id+season+episode")
 	)
 
@@ -61,6 +64,12 @@ func main() {
 		exitErr("season and episode are required and must be > 0")
 	}
 
+	hints := remap.EpisodeHints{
+		TVDBOrder:     *tvdbOrder,
+		TVDBEpisodeID: *episodeID,
+		EpisodeName:   *episodeName,
+	}
+
 	var out any
 	switch *direction {
 	case "tmdb2tvdb":
@@ -76,7 +85,7 @@ func main() {
 		if *tvdbID == 0 {
 			exitErr("tvdb-id is required for tvdb2tmdb")
 		}
-		res, err := mapper.TvdbToTmdb(ctx, *tvdbID, *season, *episode)
+		res, err := mapper.TvdbToTmdbWithHints(ctx, *tvdbID, *season, *episode, hints)
 		if err != nil {
 			exitErr(err.Error())
 		}
@@ -85,7 +94,7 @@ func main() {
 		if *imdbID == "" {
 			exitErr("imdb-id is required for imdb2tmdb")
 		}
-		res, err := mapper.ImdbToTmdb(ctx, *imdbID, *season, *episode)
+		res, err := mapper.ImdbToTmdbWithHints(ctx, *imdbID, *tmdbID, *season, *episode, hints)
 		if err != nil {
 			exitErr(err.Error())
 		}

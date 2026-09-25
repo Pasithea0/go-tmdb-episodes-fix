@@ -183,17 +183,19 @@ type SeriesExtendedRecord struct {
 }
 
 type EpisodeBaseRecord struct {
-	ID          int64  `json:"id"`
-	Name        string `json:"name"`
-	Aired       string `json:"aired"`
-	SeasonNumber int   `json:"seasonNumber"`
-	Number      int    `json:"number"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	Aired        string `json:"aired"`
+	SeriesID     int    `json:"seriesId"`
+	SeasonNumber int    `json:"seasonNumber"`
+	Number       int    `json:"number"`
 }
 
 type EpisodeExtendedRecord struct {
 	ID           int64      `json:"id"`
 	Name         string     `json:"name"`
 	Aired        string     `json:"aired"`
+	SeriesID     int        `json:"seriesId"`
 	SeasonNumber int        `json:"seasonNumber"`
 	Number       int        `json:"number"`
 	RemoteIDs    []RemoteID `json:"remoteIds"`
@@ -206,7 +208,7 @@ type SearchByRemoteIdResult struct {
 func (c *Client) SearchSeriesByRemoteID(ctx context.Context, remoteID string) (*SeriesBaseRecord, error) {
 	var resp struct {
 		Data   []SearchByRemoteIdResult `json:"data"`
-		Status string                  `json:"status"`
+		Status string                   `json:"status"`
 	}
 
 	if err := c.do(ctx, http.MethodGet, "/search/remoteid/"+url.PathEscape(remoteID), nil, nil, &resp); err != nil {
@@ -322,4 +324,3 @@ func (c *Client) GetEpisodeExtended(ctx context.Context, episodeID int64) (*Epis
 	}
 	return &resp.Data, nil
 }
-

@@ -36,9 +36,39 @@ go run ./cmd/remap -mismatches https://feed-sync.pumpkin.st/mismatches
 go run ./cmd/remap -mismatches ./mismatches.json
 ```
 
+Episode identity hints — these qualify the season/episode numbers, which are only
+meaningful relative to a TVDB numbering order (`alternate`, `dvd`, …). See
+[`pkg/remap/hints.md`](pkg/remap/hints.md) for the full contract and the live
+verification table.
+
+```bash
+# a library that follows TVDB's alternate order, sending alternate numbers
+go run ./cmd/remap -direction tvdb2tmdb -tvdb-id 73871 -season 7 -episode 1 \
+  -tvdb-order alternate -episode-name Rebirth
+
+# pin the episode by its TVDB id (unique across every order)
+go run ./cmd/remap -direction tvdb2tmdb -tvdb-id 73871 -season 6 -episode 1 \
+  -tvdb-episode-id 8234611
+
+# IMDb-numbered caller that already knows the TMDB series id
+go run ./cmd/remap -direction imdb2tmdb -imdb-id tt0149460 -tmdb-id 615 \
+  -season 7 -episode 1 -tvdb-order alternate
+```
+
+Flags: `-tvdb-order`, `-tvdb-episode-id`, `-episode-name`. Accepted order
+spellings include the Jellyfin `Series.DisplayOrder` aliases `altdvd` and
+`alttwo`.
+
 ## Library
 - Entry point: pkg/remap
   - NewMapper(remap.Options)
   - (*Mapper).TmdbToTvdb(ctx, tmdbSeriesID, season, episode)
   - (*Mapper).TvdbToTmdb(ctx, tvdbSeriesID, season, episode)
+  - (*Mapper).TvdbToTmdbWithHints(ctx, tvdbSeriesID, season, episode, remap.EpisodeHints{…})
   - (*Mapper).ImdbToTmdb(ctx, imdbID, season, episode)
+  - (*Mapper).ImdbToTmdbWithTMDB(ctx, imdbID, tmdbSeriesID, season, episode)
+  - (*Mapper).ImdbToTmdbWithHints(ctx, imdbID, tmdbSeriesID /* 0 = resolve from TVDB */, season, episode, remap.EpisodeHints{…})
+- The no-hints entry points are thin wrappers over the hint-aware ones, so their
+  behaviour is unchanged. An unset `FallbackSeasonTypes` now takes the module's
+  documented default (`official, dvd, alternate, regional`) instead of silently
+  searching the primary season type only.

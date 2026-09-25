@@ -40,6 +40,14 @@ func NewMapper(opts Options) *Mapper {
 		seasonType = "default"
 	}
 
+	// An unset fallback list means the caller didn't narrow the search, so the
+	// documented default applies. Without this the mapper silently tried the
+	// primary season type only -- the variable below existed but nothing used it.
+	fallbacks := opts.FallbackSeasonTypes
+	if len(fallbacks) == 0 {
+		fallbacks = defaultFallbackSeasonTypes
+	}
+
 	maxPages := opts.MaxTVDBPageScan
 	if maxPages <= 0 {
 		maxPages = 200
@@ -59,7 +67,7 @@ func NewMapper(opts Options) *Mapper {
 		tvdb:                tvdb.NewClient(opts.TVDBAPIKey, opts.TVDBPIN),
 		tmdb:                tmdbClient,
 		tvdbSeasonType:      seasonType,
-		fallbackSeasonTypes: opts.FallbackSeasonTypes,
+		fallbackSeasonTypes: fallbacks,
 		maxTVDBPages:        maxPages,
 		maxTMDBSeasons:      maxSeasons,
 	}
@@ -194,6 +202,7 @@ type TvdbToTmdbResult struct {
 	InputTVDBSeriesID int    `json:"input_tvdb_series_id"`
 	InputSeason       int    `json:"input_season"`
 	InputEpisode      int    `json:"input_episode"`
+	TVDBSeriesID      int    `json:"tvdb_series_id,omitempty"`
 	TVDBEpisodeID     int64  `json:"tvdb_episode_id"`
 	TVDBEpisodeName   string `json:"tvdb_episode_name"`
 	TVDBAirDate       string `json:"tvdb_air_date"`
@@ -202,6 +211,24 @@ type TvdbToTmdbResult struct {
 	TMDBSeason        int    `json:"tmdb_season"`
 	TMDBEpisode       int    `json:"tmdb_episode"`
 	MatchedBy         string `json:"matched_by"`
+
+	// Hints echo + provenance. These are additive: a caller that sends no hints
+	// keeps the historical result shape, and a caller that does send them can
+	// see which one decided the episode and whether the name agreed.
+	InputTVDBOrder     string `json:"input_tvdb_order,omitempty"`
+	InputTVDBEpisodeID int64  `json:"input_tvdb_episode_id,omitempty"`
+	InputEpisodeName   string `json:"input_episode_name,omitempty"`
+	// TVDBOrderUsed is the order the resolved TVDB episode record was found
+	// under — empty when the episode was resolved from its id alone and its
+	// numbers are not addressable under any known order.
+	TVDBOrderUsed string `json:"tvdb_order_used,omitempty"`
+	// IdentitySource says which input identified the episode:
+	// "season_episode_numbers", "tvdb_order", "tvdb_episode_id" or "episode_name".
+	IdentitySource string `json:"identity_source,omitempty"`
+	// EpisodeNameMatch is "match", "mismatch" or "unknown" for the caller's
+	// episode_name against the resolved episode. The mapper reports the fact;
+	// deciding what a mismatch means belongs to the caller.
+	EpisodeNameMatch string `json:"episode_name_match,omitempty"`
 }
 
 type ImdbToTmdbResult struct {
@@ -219,6 +246,14 @@ type ImdbToTmdbResult struct {
 	TMDBSeason       int    `json:"tmdb_season"`
 	TMDBEpisode      int    `json:"tmdb_episode"`
 	MatchedBy        string `json:"matched_by"`
+
+	// Hints echo + provenance — see TvdbToTmdbResult.
+	InputTVDBOrder     string `json:"input_tvdb_order,omitempty"`
+	InputTVDBEpisodeID int64  `json:"input_tvdb_episode_id,omitempty"`
+	InputEpisodeName   string `json:"input_episode_name,omitempty"`
+	TVDBOrderUsed      string `json:"tvdb_order_used,omitempty"`
+	IdentitySource     string `json:"identity_source,omitempty"`
+	EpisodeNameMatch   string `json:"episode_name_match,omitempty"`
 }
 
 // ImdbToTmdb maps an IMDb-numbered (season, episode) to the equivalent TMDB
@@ -227,45 +262,7 @@ type ImdbToTmdbResult struct {
 // season/episode numbering — so an IMDb-numbered episode's TVDB record (name +
 // air date, via TVDB remote ids) is the key that finds it on TMDB.
 func (m *Mapper) ImdbToTmdb(ctx context.Context, imdbID string, season int, episode int) (*ImdbToTmdbResult, error) {
-	imdbID = strings.TrimSpace(imdbID)
-	if imdbID == "" {
-		return nil, errors.New("imdb id is required")
-	}
-	if m.tmdb == nil {
-		return nil, errors.New("tmdb bearer token is required for imdb->tmdb mapping")
-	}
-
-	tvdbSeries, lookupUsed, err := m.tvdb.FindSeriesByIMDbID(ctx, imdbID)
-	if err != nil {
-		return nil, err
-	}
-	if tvdbSeries == nil {
-		return nil, fmt.Errorf("tvdb series not found for imdb id %s", imdbID)
-	}
-
-	// Reuse TvdbToTmdb: it fetches the TVDB episode, prefers the TMDB remote id
-	// on the episode, and falls back to scanning TMDB seasons by name / air date.
-	t2t, err := m.TvdbToTmdb(ctx, tvdbSeries.ID, season, episode)
-	if err != nil {
-		return nil, fmt.Errorf("imdb %s s%de%d -> tvdb %d: %w", imdbID, season, episode, tvdbSeries.ID, err)
-	}
-
-	return &ImdbToTmdbResult{
-		InputIMDbID:      imdbID,
-		InputSeason:      season,
-		InputEpisode:     episode,
-		TVDBSeriesID:     tvdbSeries.ID,
-		TVDBSeriesName:   tvdbSeries.Name,
-		TVDBSeriesLookup: lookupUsed,
-		TVDBEpisodeID:    t2t.TVDBEpisodeID,
-		TVDBEpisodeName:  t2t.TVDBEpisodeName,
-		TVDBAirDate:      t2t.TVDBAirDate,
-		TMDBSeriesID:     t2t.TMDBSeriesID,
-		TMDBEpisodeID:    t2t.TMDBEpisodeID,
-		TMDBSeason:       t2t.TMDBSeason,
-		TMDBEpisode:      t2t.TMDBEpisode,
-		MatchedBy:        t2t.MatchedBy,
-	}, nil
+	return m.ImdbToTmdbWithHints(ctx, imdbID, 0, season, episode, EpisodeHints{})
 }
 
 // ImdbToTmdbWithTMDB maps an IMDb-numbered (season, episode) to the equivalent
@@ -276,16 +273,27 @@ func (m *Mapper) ImdbToTmdb(ctx context.Context, imdbID string, season int, epis
 // IMDb id to fetch the episode's name + air date (IMDb and TVDB usually share
 // season/episode numbering), which then find the episode on TMDB.
 func (m *Mapper) ImdbToTmdbWithTMDB(ctx context.Context, imdbID string, tmdbSeriesID int, season int, episode int) (*ImdbToTmdbResult, error) {
+	return m.ImdbToTmdbWithHints(ctx, imdbID, tmdbSeriesID, season, episode, EpisodeHints{})
+}
+
+// ImdbToTmdbWithHints is ImdbToTmdbWithTMDB with the caller's episode-level
+// hints: the numbers are qualified by tvdb_order, the episode pinned by
+// tvdb_episode_id, and the title corroborated by episode_name, exactly as
+// TvdbToTmdbWithHints does. With no TMDB series id the mapping continues through
+// TvdbToTmdbWithHints (resolving the TMDB series from TVDB's remote ids).
+func (m *Mapper) ImdbToTmdbWithHints(ctx context.Context, imdbID string, tmdbSeriesID int, season int, episode int, hints EpisodeHints) (*ImdbToTmdbResult, error) {
 	imdbID = strings.TrimSpace(imdbID)
 	if imdbID == "" {
 		return nil, errors.New("imdb id is required")
 	}
-	if tmdbSeriesID <= 0 {
-		return nil, errors.New("tmdb series id is required")
-	}
 	if m.tmdb == nil {
 		return nil, errors.New("tmdb bearer token is required for imdb->tmdb mapping")
 	}
+	validated, err := m.validateHints(hints)
+	if err != nil {
+		return nil, err
+	}
+	hints = validated
 
 	tvdbSeries, lookupUsed, err := m.tvdb.FindSeriesByIMDbID(ctx, imdbID)
 	if err != nil {
@@ -295,50 +303,113 @@ func (m *Mapper) ImdbToTmdbWithTMDB(ctx context.Context, imdbID string, tmdbSeri
 		return nil, fmt.Errorf("tvdb series not found for imdb id %s", imdbID)
 	}
 
-	eps, err := m.fetchEpisodesBySeasonType(ctx, tvdbSeries.ID, season, episode)
-	if err != nil {
-		return nil, err
-	}
-	if len(eps) == 0 {
-		return nil, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d (tried season types: %s)",
-			tvdbSeries.ID, season, episode, m.seasonTypesTried())
+	if tmdbSeriesID <= 0 {
+		t2t, err := m.TvdbToTmdbWithHints(ctx, tvdbSeries.ID, season, episode, hints)
+		if err != nil {
+			return nil, fmt.Errorf("imdb %s s%de%d -> tvdb %d: %w", imdbID, season, episode, tvdbSeries.ID, err)
+		}
+		return imdbResultFromTvdb(imdbID, tvdbSeries, lookupUsed, t2t), nil
 	}
 
-	tvdbEp := eps[0]
-	seasonNum, epNum, epID, matchedBy, err := m.scanTMDBSeasons(ctx, tmdbSeriesID, tvdbEp)
+	sel, err := m.resolveEpisode(ctx, tvdbSeries.ID, season, episode, hints)
+	if err != nil {
+		return nil, fmt.Errorf("imdb %s s%de%d -> tvdb %d: %w", imdbID, season, episode, tvdbSeries.ID, err)
+	}
+	tvdbEp := sel.Episode
+
+	seasonNum, epNum, epID, matchedBy, err := m.scanTMDBSeasons(ctx, tmdbSeriesID, tvdbEp, orderGroupAllowed(sel.Order))
 	if err != nil {
 		return nil, fmt.Errorf("imdb %s s%de%d -> tvdb %d: %w", imdbID, season, episode, tvdbSeries.ID, err)
 	}
 
 	return &ImdbToTmdbResult{
-		InputIMDbID:      imdbID,
-		InputSeason:      season,
-		InputEpisode:     episode,
-		TVDBSeriesID:     tvdbSeries.ID,
-		TVDBSeriesName:   tvdbSeries.Name,
-		TVDBSeriesLookup: lookupUsed,
-		TVDBEpisodeID:    tvdbEp.ID,
-		TVDBEpisodeName:  tvdbEp.Name,
-		TVDBAirDate:      tvdbEp.Aired,
-		TMDBSeriesID:     tmdbSeriesID,
-		TMDBEpisodeID:    epID,
-		TMDBSeason:       seasonNum,
-		TMDBEpisode:      epNum,
-		MatchedBy:        matchedBy,
+		InputIMDbID:        imdbID,
+		InputSeason:        season,
+		InputEpisode:       episode,
+		TVDBSeriesID:       tvdbSeries.ID,
+		TVDBSeriesName:     tvdbSeries.Name,
+		TVDBSeriesLookup:   lookupUsed,
+		TVDBEpisodeID:      tvdbEp.ID,
+		TVDBEpisodeName:    tvdbEp.Name,
+		TVDBAirDate:        tvdbEp.Aired,
+		TMDBSeriesID:       tmdbSeriesID,
+		TMDBEpisodeID:      epID,
+		TMDBSeason:         seasonNum,
+		TMDBEpisode:        epNum,
+		MatchedBy:          matchedBy,
+		InputTVDBOrder:     hints.TVDBOrder,
+		InputTVDBEpisodeID: hints.TVDBEpisodeID,
+		InputEpisodeName:   hints.EpisodeName,
+		TVDBOrderUsed:      sel.Order,
+		IdentitySource:     sel.Source,
+		EpisodeNameMatch:   episodeNameMatch(hints.EpisodeName, tvdbEp.Name),
 	}, nil
 }
 
+// imdbResultFromTvdb reshapes a tvdb->tmdb result into the imdb->tmdb result,
+// carrying the hints' provenance across.
+func imdbResultFromTvdb(imdbID string, tvdbSeries *tvdb.SeriesBaseRecord, lookupUsed string, t2t *TvdbToTmdbResult) *ImdbToTmdbResult {
+	return &ImdbToTmdbResult{
+		InputIMDbID:        imdbID,
+		InputSeason:        t2t.InputSeason,
+		InputEpisode:       t2t.InputEpisode,
+		TVDBSeriesID:       tvdbSeries.ID,
+		TVDBSeriesName:     tvdbSeries.Name,
+		TVDBSeriesLookup:   lookupUsed,
+		TVDBEpisodeID:      t2t.TVDBEpisodeID,
+		TVDBEpisodeName:    t2t.TVDBEpisodeName,
+		TVDBAirDate:        t2t.TVDBAirDate,
+		TMDBSeriesID:       t2t.TMDBSeriesID,
+		TMDBEpisodeID:      t2t.TMDBEpisodeID,
+		TMDBSeason:         t2t.TMDBSeason,
+		TMDBEpisode:        t2t.TMDBEpisode,
+		MatchedBy:          t2t.MatchedBy,
+		InputTVDBOrder:     t2t.InputTVDBOrder,
+		InputTVDBEpisodeID: t2t.InputTVDBEpisodeID,
+		InputEpisodeName:   t2t.InputEpisodeName,
+		TVDBOrderUsed:      t2t.TVDBOrderUsed,
+		IdentitySource:     t2t.IdentitySource,
+		EpisodeNameMatch:   t2t.EpisodeNameMatch,
+	}
+}
+
+// TvdbToTmdb maps a TVDB-numbered (season, episode) to the equivalent TMDB
+// episode with no hints: the caller's numbers are read under the mapper's
+// primary season type and then its fallbacks — the historical behaviour.
 func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, episode int) (*TvdbToTmdbResult, error) {
-	eps, err := m.fetchEpisodesBySeasonType(ctx, tvdbSeriesID, season, episode)
+	return m.TvdbToTmdbWithHints(ctx, tvdbSeriesID, season, episode, EpisodeHints{})
+}
+
+// TvdbToTmdbWithHints maps a TVDB episode to TMDB using the caller's
+// episode-level hints. Episode identity is resolved most-specific-first:
+//
+//  1. an episode id — unique across every TVDB order, so it identifies the
+//     episode exactly, and the order it is found under is the order that defines
+//     the caller's numbers;
+//  2. an order name — the caller's season/episode are read under that order
+//     only, with no fallback (the caller said what the numbers mean);
+//  3. the numbers alone — primary season type, then fallbacks, as before;
+//  4. the episode name — corroboration at every step, and a resolver of last
+//     resort when nothing else identifies an episode and the name matches
+//     exactly one episode of the series.
+//
+// The resolved TVDB record is then located on TMDB by the existing remote-id /
+// name / air-date cascade. The caller's episode name is compared against the
+// resolved episode and reported as EpisodeNameMatch ("match" / "mismatch" /
+// "unknown"); the mapper reports that fact and leaves the policy to the caller.
+func (m *Mapper) TvdbToTmdbWithHints(ctx context.Context, tvdbSeriesID int, season int, episode int, hints EpisodeHints) (*TvdbToTmdbResult, error) {
+	validated, err := m.validateHints(hints)
 	if err != nil {
 		return nil, err
 	}
-	if len(eps) == 0 {
-		return nil, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d (tried season types: %s)",
-			tvdbSeriesID, season, episode, m.seasonTypesTried())
-	}
+	hints = validated
 
-	tvdbEp := eps[0]
+	sel, err := m.resolveEpisode(ctx, tvdbSeriesID, season, episode, hints)
+	if err != nil {
+		return nil, err
+	}
+	tvdbEp := sel.Episode
+
 	ext, err := m.tvdb.GetEpisodeExtended(ctx, tvdbEp.ID)
 	if err != nil {
 		return nil, err
@@ -352,15 +423,27 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 		tmdbSeriesID = findRemoteNumericID(seriesExt.RemoteIDs, []string{"moviedb", "tmdb"})
 	}
 
+	resolvedSeriesID := tvdbSeriesID
+	if tvdbEp.SeriesID != 0 {
+		resolvedSeriesID = tvdbEp.SeriesID
+	}
+
 	res := &TvdbToTmdbResult{
-		InputTVDBSeriesID: tvdbSeriesID,
-		InputSeason:       season,
-		InputEpisode:      episode,
-		TVDBEpisodeID:     tvdbEp.ID,
-		TVDBEpisodeName:   tvdbEp.Name,
-		TVDBAirDate:       tvdbEp.Aired,
-		TMDBSeriesID:      tmdbSeriesID,
-		TMDBEpisodeID:     tmdbEpisodeID,
+		InputTVDBSeriesID:  tvdbSeriesID,
+		InputSeason:        season,
+		InputEpisode:       episode,
+		TVDBSeriesID:       resolvedSeriesID,
+		TVDBEpisodeID:      tvdbEp.ID,
+		TVDBEpisodeName:    tvdbEp.Name,
+		TVDBAirDate:        tvdbEp.Aired,
+		TMDBSeriesID:       tmdbSeriesID,
+		TMDBEpisodeID:      tmdbEpisodeID,
+		InputTVDBOrder:     hints.TVDBOrder,
+		InputTVDBEpisodeID: hints.TVDBEpisodeID,
+		InputEpisodeName:   hints.EpisodeName,
+		TVDBOrderUsed:      sel.Order,
+		IdentitySource:     sel.Source,
+		EpisodeNameMatch:   episodeNameMatch(hints.EpisodeName, tvdbEp.Name),
 	}
 
 	if m.tmdb == nil {
@@ -393,7 +476,7 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 		return nil, errors.New("tvdb episode missing both air date and name; cannot scan tmdb seasons")
 	}
 
-	seasonNum, epNum, epID, matchedBy, err := m.scanTMDBSeasons(ctx, tmdbSeriesID, tvdbEp)
+	seasonNum, epNum, epID, matchedBy, err := m.scanTMDBSeasons(ctx, tmdbSeriesID, tvdbEp, orderGroupAllowed(sel.Order))
 	if err != nil {
 		return nil, err
 	}
@@ -406,7 +489,10 @@ func (m *Mapper) TvdbToTmdb(ctx context.Context, tvdbSeriesID int, season int, e
 
 // scanTMDBSeasons finds the TMDB (season, episode) matching a TVDB episode by
 // scanning every season of the given TMDB series with matchSeasonEpisode.
-func (m *Mapper) scanTMDBSeasons(ctx context.Context, tmdbSeriesID int, tvdbEp tvdb.EpisodeBaseRecord) (seasonNum int, epNum int, epID int, matchedBy string, err error) {
+// allowOrderGroup enables the TMDB "TVDB Order" episode group as a last-resort
+// fallback; it only carries meaning for TVDB default/official numbering, so a
+// caller resolving under another order must pass false.
+func (m *Mapper) scanTMDBSeasons(ctx context.Context, tmdbSeriesID int, tvdbEp tvdb.EpisodeBaseRecord, allowOrderGroup bool) (seasonNum int, epNum int, epID int, matchedBy string, err error) {
 	tv, err := m.tmdb.GetTVDetails(ctx, tmdbSeriesID)
 	if err != nil {
 		return 0, 0, 0, "", err
@@ -435,7 +521,7 @@ func (m *Mapper) scanTMDBSeasons(ctx context.Context, tmdbSeriesID int, tvdbEp t
 	// season number; the episode's 0-based position within the bucket is the
 	// TVDB episode number - 1. The mapped TMDB season/episode numbers and id
 	// come from the group entry itself.
-	if m.tvdbSeasonType == "default" || m.tvdbSeasonType == "" {
+	if allowOrderGroup {
 		if epID, tmdbSeason, tmdbEpisode := m.mapViaTVDBOrderGroup(ctx, tmdbSeriesID, tvdbEp); epID != 0 {
 			return tmdbSeason, tmdbEpisode, epID, "tvdb_order_group", nil
 		}
@@ -592,27 +678,159 @@ func (m *Mapper) seasonTypesTried() string {
 	return strings.Join(types, ", ")
 }
 
-// fetchEpisodesBySeasonType returns the episodes for a series/season/episode
-// under the first season type (primary, then fallbacks) that yields any. TVDB
-// 404s an ordering when the show's episodes don't exist under it (e.g. only
-// "official"/"dvd", not "default"), so a NotFoundError - or an empty result -
-// means "not under this ordering" and falls through to the next season type.
-// Non-404 errors are remembered but do not stop the scan (a transient error on
-// one ordering shouldn't hide a hit on another); if no ordering matches, the
-// first non-404 error is returned so real failures aren't masked as "not found".
-func (m *Mapper) fetchEpisodesBySeasonType(ctx context.Context, tvdbSeriesID, season, episode int) ([]tvdb.EpisodeBaseRecord, error) {
-	types := append([]string{m.tvdbSeasonType}, m.fallbackSeasonTypes...)
+// ---------------------------------------------------------------------------
+// Episode identity hints
+//
+// A caller's (season, episode) pair only means something relative to a numbering
+// order: TVDB `alternate` s6e1 is "Bender's Big Score (1)" while `official`
+// s6e1 is "Rebirth", and both are real episodes of the same series. The hints
+// below let a caller say which episode it means in a way that survives that.
+// ---------------------------------------------------------------------------
+
+// EpisodeHints carries a caller's episode-level identity add-ons. Every field is
+// optional; season/episode are always required and are what the hints qualify.
+type EpisodeHints struct {
+	// TVDBOrder names the TVDB order the caller's season/episode numbers belong
+	// to ("official", "dvd", "absolute", "alternate", "regional", "default",
+	// plus the Jellyfin displayorder aliases). Empty means "not supplied".
+	TVDBOrder string
+	// TVDBEpisodeID is a TVDB episode id. TVDB episode ids are unique across all
+	// orders, so an id identifies the episode with no numbering needed.
+	TVDBEpisodeID int64
+	// EpisodeName is the caller's episode title, used as corroboration.
+	EpisodeName string
+}
+
+// Identity sources reported on the result.
+const (
+	IdentitySourceNumbers   = "season_episode_numbers"
+	IdentitySourceOrder     = "tvdb_order"
+	IdentitySourceEpisodeID = "tvdb_episode_id"
+	IdentitySourceName      = "episode_name"
+)
+
+// Episode-name comparison outcomes.
+const (
+	NameMatchMatch    = "match"
+	NameMatchMismatch = "mismatch"
+	NameMatchUnknown  = "unknown"
+)
+
+// EpisodeHintError reports hints that contradict each other, or an unknown
+// order value. An episode id that disagrees with the episode found at the
+// caller's numbers under a resolvable order cannot be honoured two ways at once,
+// so it is an error rather than a silent pick.
+type EpisodeHintError struct {
+	Field  string
+	Detail string
+}
+
+func (e *EpisodeHintError) Error() string { return e.Field + ": " + e.Detail }
+
+// tvdbOrderAliases maps every accepted spelling to the TVDB season-type name
+// used by /series/{id}/episodes/{type}.
+var tvdbOrderAliases = map[string]string{
+	"default":         "default",
+	"defaultorder":    "default",
+	"official":        "official",
+	"officialorder":   "official",
+	"aired":           "official",
+	"airedorder":      "official",
+	"dvd":             "dvd",
+	"altdvd":          "dvd",
+	"dvdorder":        "dvd",
+	"absolute":        "absolute",
+	"absoluteorder":   "absolute",
+	"abso":            "absolute",
+	"alternate":       "alternate",
+	"alternateorder":  "alternate",
+	"alttwo":          "alternate",
+	"streaming":       "alternate",
+	"streamingorder":  "alternate",
+	"regional":        "regional",
+	"regionalorder":   "regional",
+	"production":      "regional",
+	"productionorder": "regional",
+}
+
+// TVDBOrders lists the order names searched when an episode id has to be located
+// without an order hint, in preference order.
+var TVDBOrders = []string{"default", "official", "dvd", "alternate", "absolute", "regional"}
+
+// NormalizeTVDBOrder resolves an order spelling to the TVDB season-type name. It
+// accepts TVDB's own names and the Jellyfin displayorder vocabulary
+// (Series.DisplayOrder: official, regional, alternate, altdvd, dvd, absolute,
+// alttwo), ignoring case, spaces, dashes and underscores.
+func NormalizeTVDBOrder(name string) (string, bool) {
+	key := strings.ToLower(strings.TrimSpace(name))
+	key = strings.NewReplacer(" ", "", "-", "", "_", "").Replace(key)
+	order, ok := tvdbOrderAliases[key]
+	return order, ok
+}
+
+// identitySelection is the TVDB episode record a hint set resolved, plus how.
+type identitySelection struct {
+	Episode tvdb.EpisodeBaseRecord
+	// Order is the order the record was found under; empty when the episode was
+	// resolved from its id alone and its numbers exist under no known order.
+	Order  string
+	Source string
+}
+
+// orderCandidate is one TVDB episode record found at the caller's numbers under
+// one order.
+type orderCandidate struct {
+	Order   string
+	Episode tvdb.EpisodeBaseRecord
+}
+
+// selectEpisodeByHints picks the candidate the caller's hints identify.
+//
+// Precedence: an episode id identifies the episode exactly (the order it was
+// found under is then the order that defines the caller's numbers); otherwise
+// the candidates are already in preference order and the first one wins, which
+// reproduces the historical "primary season type, then fallbacks" behaviour.
+func selectEpisodeByHints(candidates []orderCandidate, hints EpisodeHints, season, episode int) (orderCandidate, error) {
+	if len(candidates) == 0 {
+		return orderCandidate{}, &EpisodeHintError{Field: "season/episode", Detail: "no candidate episodes"}
+	}
+	if hints.TVDBEpisodeID != 0 {
+		for _, c := range candidates {
+			if c.Episode.ID == hints.TVDBEpisodeID {
+				return c, nil
+			}
+		}
+		orders := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			orders = append(orders, fmt.Sprintf("%s=%d", c.Order, c.Episode.ID))
+		}
+		return orderCandidate{}, &EpisodeHintError{
+			Field: "tvdb_episode_id",
+			Detail: fmt.Sprintf("episode id %d is not the episode at season %d episode %d under any order (%s)",
+				hints.TVDBEpisodeID, season, episode, strings.Join(orders, ", ")),
+		}
+	}
+	return candidates[0], nil
+}
+
+// candidatesForHints fetches the episode records at the caller's numbers under
+// every order worth trying, in preference order. A 404 or empty answer means
+// "not under this order" (TVDB 404s an order the show has no episodes under), so
+// it falls through; a real error is remembered but does not stop the scan, and
+// is returned only when nothing matched at all.
+func (m *Mapper) candidatesForHints(ctx context.Context, seriesID, season, episode int, hints EpisodeHints) ([]orderCandidate, error, error) {
+	orders := m.ordersForHints(hints)
+	candidates := make([]orderCandidate, 0, len(orders))
 	var firstErr error
-	for _, seasonType := range types {
+	for _, order := range orders {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, nil, ctx.Err()
 		}
 		s, e := season, episode
-		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeriesID, seasonType, 0, &s, &e, nil)
+		eps, err := m.tvdb.GetSeriesEpisodes(ctx, seriesID, order, 0, &s, &e, nil)
 		if err != nil {
 			var nf *tvdb.NotFoundError
 			if errors.As(err, &nf) {
-				// Not present under this ordering - try the next season type.
 				continue
 			}
 			if firstErr == nil {
@@ -620,14 +838,197 @@ func (m *Mapper) fetchEpisodesBySeasonType(ctx context.Context, tvdbSeriesID, se
 			}
 			continue
 		}
-		if len(eps) > 0 {
-			return eps, nil
+		for _, ep := range eps {
+			candidates = append(candidates, orderCandidate{Order: order, Episode: ep})
 		}
 	}
-	if firstErr != nil {
-		return nil, firstErr
+	return candidates, firstErr, nil
+}
+
+// ordersForHints decides which orders to read the caller's numbers under.
+// An explicit order is used alone — the caller said what the numbers mean, so
+// falling back to another order would answer a different question. An episode id
+// with no order must be locatable, so every order is worth a look (primary
+// first, so the common case stays one request).
+func (m *Mapper) ordersForHints(hints EpisodeHints) []string {
+	if hints.TVDBOrder != "" {
+		return []string{hints.TVDBOrder}
 	}
-	return nil, nil
+	if hints.TVDBEpisodeID != 0 {
+		orders := []string{m.tvdbSeasonType}
+		orders = append(orders, m.fallbackSeasonTypes...)
+		for _, o := range TVDBOrders {
+			if !containsString(orders, o) {
+				orders = append(orders, o)
+			}
+		}
+		return orders
+	}
+	return append([]string{m.tvdbSeasonType}, m.fallbackSeasonTypes...)
+}
+
+// resolveEpisode turns a hint set plus numbers into one TVDB episode record.
+func (m *Mapper) resolveEpisode(ctx context.Context, tvdbSeriesID, season, episode int, hints EpisodeHints) (identitySelection, error) {
+	candidates, firstErr, err := m.candidatesForHints(ctx, tvdbSeriesID, season, episode, hints)
+	if err != nil {
+		return identitySelection{}, err
+	}
+
+	if len(candidates) > 0 {
+		sel, err := selectEpisodeByHints(candidates, hints, season, episode)
+		if err != nil {
+			return identitySelection{}, err
+		}
+		source := IdentitySourceNumbers
+		switch {
+		case hints.TVDBEpisodeID != 0:
+			source = IdentitySourceEpisodeID
+		case hints.TVDBOrder != "":
+			source = IdentitySourceOrder
+		}
+		return identitySelection{Episode: sel.Episode, Order: sel.Order, Source: source}, nil
+	}
+
+	// Nothing addressable at the caller's numbers under any order tried. An
+	// episode id is still authoritative (it is unique across every order), and a
+	// name is too when it matches exactly one episode of the series.
+	if hints.TVDBEpisodeID != 0 {
+		ep, err := m.tvdb.GetEpisodeExtended(ctx, hints.TVDBEpisodeID)
+		if err != nil {
+			return identitySelection{}, err
+		}
+		if ep.SeriesID != 0 && tvdbSeriesID != 0 && ep.SeriesID != tvdbSeriesID {
+			return identitySelection{}, &EpisodeHintError{
+				Field: "tvdb_episode_id",
+				Detail: fmt.Sprintf("episode id %d belongs to series %d, not %d",
+					hints.TVDBEpisodeID, ep.SeriesID, tvdbSeriesID),
+			}
+		}
+		return identitySelection{
+			Episode: tvdb.EpisodeBaseRecord{
+				ID: ep.ID, Name: ep.Name, Aired: ep.Aired, SeriesID: ep.SeriesID,
+				SeasonNumber: ep.SeasonNumber, Number: ep.Number,
+			},
+			Source: IdentitySourceEpisodeID,
+		}, nil
+	}
+
+	if strings.TrimSpace(hints.EpisodeName) != "" {
+		ep, err := m.findEpisodeByName(ctx, tvdbSeriesID, hints.EpisodeName)
+		if err != nil {
+			return identitySelection{}, err
+		}
+		if ep != nil {
+			return identitySelection{Episode: *ep, Source: IdentitySourceName}, nil
+		}
+	}
+
+	if firstErr != nil {
+		return identitySelection{}, firstErr
+	}
+	return identitySelection{}, fmt.Errorf("tvdb episode not found: series=%d season=%d episode=%d (tried season types: %s)",
+		tvdbSeriesID, season, episode, m.seasonTypesTried())
+}
+
+// findEpisodeByName locates the series episode whose name matches exactly,
+// scanning the known orders within a bounded page budget. No match returns nil;
+// more than one match is an error rather than a first-hit pick, because a first
+// hit silently returns the wrong episode when names repeat (the shared-air-date
+// lesson). Matches are deduped by episode id — the same episode appears in every
+// order that contains it.
+func (m *Mapper) findEpisodeByName(ctx context.Context, seriesID int, name string) (*tvdb.EpisodeBaseRecord, error) {
+	want := normalizeName(name)
+	if want == "" {
+		return nil, nil
+	}
+
+	budget := m.maxTVDBPages
+	seen := map[int64]bool{}
+	var matches []tvdb.EpisodeBaseRecord
+
+	for _, order := range TVDBOrders {
+		for page := 0; page < m.maxTVDBPages && budget > 0; page++ {
+			eps, err := m.tvdb.GetSeriesEpisodes(ctx, seriesID, order, page, nil, nil, nil)
+			if err != nil || len(eps) == 0 {
+				break
+			}
+			budget--
+			for _, ep := range eps {
+				if ep.ID != 0 && normalizeName(ep.Name) == want && !seen[ep.ID] {
+					seen[ep.ID] = true
+					matches = append(matches, ep)
+				}
+			}
+		}
+		if budget <= 0 {
+			break
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		return &matches[0], nil
+	default:
+		ids := make([]string, 0, len(matches))
+		for _, ep := range matches {
+			ids = append(ids, strconv.FormatInt(ep.ID, 10))
+		}
+		return nil, fmt.Errorf("episode name %q matches %d episodes (ids: %s); supply tvdb_order or an episode id",
+			name, len(matches), strings.Join(ids, ", "))
+	}
+}
+
+// validateHints normalizes the order spelling and rejects an unknown one, and
+// trims the name.
+func (m *Mapper) validateHints(hints EpisodeHints) (EpisodeHints, error) {
+	if strings.TrimSpace(hints.TVDBOrder) != "" {
+		order, ok := NormalizeTVDBOrder(hints.TVDBOrder)
+		if !ok {
+			return hints, &EpisodeHintError{
+				Field: "tvdb_order",
+				Detail: fmt.Sprintf("unknown order %q (accepted: official, dvd, absolute, alternate, regional, default, altdvd, alttwo)",
+					strings.TrimSpace(hints.TVDBOrder)),
+			}
+		}
+		hints.TVDBOrder = order
+	}
+	hints.EpisodeName = strings.TrimSpace(hints.EpisodeName)
+	return hints, nil
+}
+
+// episodeNameMatch compares the caller's episode title with the resolved one on
+// normalized names. A missing side is "unknown", never a mismatch: a caller that
+// cannot supply a name, or an episode with no upstream name, must not be treated
+// as disagreeing.
+func episodeNameMatch(want, got string) string {
+	w := normalizeName(want)
+	g := normalizeName(got)
+	if w == "" || g == "" {
+		return NameMatchUnknown
+	}
+	if w == g {
+		return NameMatchMatch
+	}
+	return NameMatchMismatch
+}
+
+// orderGroupAllowed reports whether TMDB's own "TVDB Order" episode group may be
+// used as a last-resort fallback for a record found under this order. The group
+// is keyed by TVDB default/official season and episode positions, so it carries
+// no meaning for another order — and no meaning at all when the order is unknown.
+func orderGroupAllowed(order string) bool {
+	return order == "" || order == "default" || order == "official"
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func findRemoteNumericID(ids []tvdb.RemoteID, hints []string) int {
