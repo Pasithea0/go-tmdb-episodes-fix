@@ -726,16 +726,20 @@ func (m *Mapper) TvdbToTmdbWithHints(ctx context.Context, tvdbSeriesID int, seas
 
 	if tmdbEpisodeID != 0 {
 		byID, err := m.tmdb.GetEpisodeByID(ctx, tmdbEpisodeID)
-		if err != nil {
-			return nil, err
+		// A stale TVDB remote id points at a TMDB episode that no longer exists:
+		// measured 2026-09-25, Futurama's specials carry ids 13253 and 15060 and
+		// both 404. Aborting on that refuses to answer a question the name and
+		// air date can still settle, so fall through to the season scan instead.
+		// A dead pointer is not evidence that the episode cannot be mapped.
+		if err == nil && byID != nil {
+			res.TMDBSeason = byID.SeasonNumber
+			res.TMDBEpisode = byID.EpisodeNumber
+			if byID.ShowID != 0 {
+				res.TMDBSeriesID = byID.ShowID
+			}
+			res.MatchedBy = "tvdb_episode_remote_id"
+			return res, nil
 		}
-		res.TMDBSeason = byID.SeasonNumber
-		res.TMDBEpisode = byID.EpisodeNumber
-		if byID.ShowID != 0 {
-			res.TMDBSeriesID = byID.ShowID
-		}
-		res.MatchedBy = "tvdb_episode_remote_id"
-		return res, nil
 	}
 
 	if tmdbSeriesID == 0 {

@@ -195,6 +195,14 @@ func futuramaTVDB() *fakeTVDB {
 					{ID: 1001, Name: "Space Pilot 3000", Aired: "1999-03-28", SeriesID: 73871, SeasonNumber: 1, Number: 1},
 					{ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeriesID: 73871, SeasonNumber: 6, Number: 1},
 					{ID: 4319164, Name: "The Bots and the Bees", Aired: "2012-06-20", SeriesID: 73871, SeasonNumber: 7, Number: 1},
+					// Season 0 (specials), as TVDB 73871 "default" really lists them,
+					// names carrying the series prefix.
+					{ID: 389457, Name: "Everybody Loves Hypnotoad", Aired: "2007-11-27", SeriesID: 73871, SeasonNumber: 0, Number: 1},
+					{ID: 342888, Name: "Futurama: Bender's Big Score", Aired: "2007-11-27", SeriesID: 73871, SeasonNumber: 0, Number: 2},
+					{ID: 359477, Name: "Futurama: The Beast with a Billion Backs", Aired: "2008-06-30", SeriesID: 73871, SeasonNumber: 0, Number: 3},
+					{ID: 372786, Name: "Futurama: The Lost Adventure", Aired: "2008-06-24", SeriesID: 73871, SeasonNumber: 0, Number: 4},
+					{ID: 395236, Name: "Futurama: Bender's Game", Aired: "2008-11-03", SeriesID: 73871, SeasonNumber: 0, Number: 5},
+					{ID: 427447, Name: "Futurama: Into the Wild Green Yonder", Aired: "2009-02-24", SeriesID: 73871, SeasonNumber: 0, Number: 6},
 				},
 				"alternate": {
 					{ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeriesID: 73871, SeasonNumber: 6, Number: 1},
@@ -203,6 +211,12 @@ func futuramaTVDB() *fakeTVDB {
 			},
 		},
 		episodesByID: map[int64]tvdb.EpisodeBaseRecord{
+			389457:  {ID: 389457, Name: "Everybody Loves Hypnotoad", Aired: "2007-11-27", SeasonNumber: 0, Number: 1},
+			342888:  {ID: 342888, Name: "Futurama: Bender's Big Score", Aired: "2007-11-27", SeasonNumber: 0, Number: 2},
+			359477:  {ID: 359477, Name: "Futurama: The Beast with a Billion Backs", Aired: "2008-06-30", SeasonNumber: 0, Number: 3},
+			372786:  {ID: 372786, Name: "Futurama: The Lost Adventure", Aired: "2008-06-24", SeasonNumber: 0, Number: 4},
+			395236:  {ID: 395236, Name: "Futurama: Bender's Game", Aired: "2008-11-03", SeasonNumber: 0, Number: 5},
+			427447:  {ID: 427447, Name: "Futurama: Into the Wild Green Yonder", Aired: "2009-02-24", SeasonNumber: 0, Number: 6},
 			1051911: {ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeasonNumber: 6, Number: 1},
 			8234611: {ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeasonNumber: 6, Number: 1},
 		},
