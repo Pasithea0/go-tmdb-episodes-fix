@@ -149,13 +149,19 @@ func (c *Client) GetEpisodeByID(ctx context.Context, episodeID int) (*EpisodeByI
 }
 
 type TVDetails struct {
+	// Name is the series title as TMDB has it. Used to corroborate a TVDB series
+	// link: TVDB's remote-id search can return a different series entirely when a
+	// bare number collides across id namespaces (tmdb 1433 -> tvdb 84070
+	// "War and Remembrance"), so an unverified id is not a mapping.
+	Name            string
 	NumberOfSeasons int
 }
 
 func (c *Client) GetTVDetails(ctx context.Context, tvID int) (*TVDetails, error) {
 	path := "/tv/" + strconv.Itoa(tvID)
 	var resp struct {
-		NumberOfSeasons int `json:"number_of_seasons"`
+		Name            string `json:"name"`
+		NumberOfSeasons int    `json:"number_of_seasons"`
 	}
 	if err := c.doGet(ctx, path, nil, &resp); err != nil {
 		return nil, err
@@ -163,7 +169,7 @@ func (c *Client) GetTVDetails(ctx context.Context, tvID int) (*TVDetails, error)
 	if resp.NumberOfSeasons == 0 {
 		return nil, errors.New("tmdb tv details returned empty number_of_seasons")
 	}
-	return &TVDetails{NumberOfSeasons: resp.NumberOfSeasons}, nil
+	return &TVDetails{Name: resp.Name, NumberOfSeasons: resp.NumberOfSeasons}, nil
 }
 
 type SeasonEpisode struct {

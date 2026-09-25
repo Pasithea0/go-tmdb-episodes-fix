@@ -21,17 +21,53 @@ type Options struct {
 	FallbackSeasonTypes []string
 	MaxTVDBPageScan     int
 	MaxTMDBSeasonScan   int
+	// AllowCoordinateIdentityFallback opts back in to the removed behaviour where
+	// an unmatchable episode is assumed to share coordinates across schemes.
+	// Leave false unless a caller has independently established that the orders
+	// agree; results then carry MatchedBy "assumed_same_coordinates".
+	AllowCoordinateIdentityFallback bool
 }
 
 var defaultFallbackSeasonTypes = []string{"official", "dvd", "alternate", "regional"}
 
+// tvdbAPI is the slice of the TVDB client the mapper depends on. Declaring it as
+// an interface keeps the mapping rules unit-testable: the rules are the part that
+// silently produces wrong episodes, and they cannot be tested through a concrete
+// client that reaches the network.
+type tvdbAPI interface {
+	SearchSeriesByRemoteID(ctx context.Context, remoteID string) (*tvdb.SeriesBaseRecord, error)
+	FindSeriesByIMDbID(ctx context.Context, imdbID string) (*tvdb.SeriesBaseRecord, string, error)
+	FindSeriesByTMDBID(ctx context.Context, tmdbID int) (*tvdb.SeriesBaseRecord, string, error)
+	GetSeriesExtended(ctx context.Context, seriesID int) (*tvdb.SeriesExtendedRecord, error)
+	GetSeriesEpisodes(ctx context.Context, seriesID int, seasonType string, page int, season *int, episodeNumber *int, airDate *string) ([]tvdb.EpisodeBaseRecord, error)
+	GetEpisodeExtended(ctx context.Context, episodeID int64) (*tvdb.EpisodeExtendedRecord, error)
+}
+
+// tmdbAPI is the slice of the TMDB client the mapper depends on.
+type tmdbAPI interface {
+	GetEpisodeDetails(ctx context.Context, tvID int, season int, episode int) (*tmdb.EpisodeDetails, error)
+	GetEpisodeByID(ctx context.Context, episodeID int) (*tmdb.EpisodeByID, error)
+	GetTVDetails(ctx context.Context, tvID int) (*tmdb.TVDetails, error)
+	GetEpisodeGroups(ctx context.Context, tvID int) ([]tmdb.EpisodeGroup, error)
+	GetEpisodeGroup(ctx context.Context, groupID string) (*tmdb.EpisodeGroupDetail, error)
+	GetSeasonEpisodes(ctx context.Context, tvID int, season int) ([]tmdb.SeasonEpisode, error)
+}
+
 type Mapper struct {
-	tvdb                *tvdb.Client
-	tmdb                *tmdb.Client
+	tvdb                tvdbAPI
+	tmdb                tmdbAPI
 	tvdbSeasonType      string
 	fallbackSeasonTypes []string
 	maxTVDBPages        int
 	maxTMDBSeasons      int
+	// allowCoordinateIdentityFallback re-enables the behaviour where an episode
+	// that cannot be matched by air date or name is assumed to sit at the same
+	// coordinates in both schemes. Off by default: that assumption is false for
+	// exactly the shows this mapper exists to handle (TMDB Futurama S6E1 is
+	// "Bender's Big Score (1)" in the alternate order while TVDB default S6E1 is
+	// "Rebirth"). When on, results carry MatchedBy "assumed_same_coordinates" so
+	// a caller can never mistake the guess for a match.
+	allowCoordinateIdentityFallback bool
 }
 
 func NewMapper(opts Options) *Mapper {
@@ -58,18 +94,22 @@ func NewMapper(opts Options) *Mapper {
 		maxSeasons = 300
 	}
 
-	var tmdbClient *tmdb.Client
+	// Declared as the interface, not the concrete client: assigning a nil
+	// *tmdb.Client into an interface field yields a non-nil interface holding a
+	// nil pointer, so the `m.tmdb == nil` guard in TmdbToTvdb would stop working.
+	var tmdbClient tmdbAPI
 	if strings.TrimSpace(opts.TMDBBearerToken) != "" {
 		tmdbClient = tmdb.NewClient(opts.TMDBBearerToken)
 	}
 
 	return &Mapper{
-		tvdb:                tvdb.NewClient(opts.TVDBAPIKey, opts.TVDBPIN),
-		tmdb:                tmdbClient,
-		tvdbSeasonType:      seasonType,
-		fallbackSeasonTypes: fallbacks,
-		maxTVDBPages:        maxPages,
-		maxTMDBSeasons:      maxSeasons,
+		tvdb:                            tvdb.NewClient(opts.TVDBAPIKey, opts.TVDBPIN),
+		tmdb:                            tmdbClient,
+		tvdbSeasonType:                  seasonType,
+		fallbackSeasonTypes:             fallbacks,
+		maxTVDBPages:                    maxPages,
+		maxTMDBSeasons:                  maxSeasons,
+		allowCoordinateIdentityFallback: opts.AllowCoordinateIdentityFallback,
 	}
 }
 
@@ -173,29 +213,37 @@ func (m *Mapper) TmdbToTvdb(ctx context.Context, tmdbSeriesID int, season int, e
 		}
 	}
 
-	s := season
-	e := episode
-	eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, m.tvdbSeasonType, 0, &s, &e, nil)
-	if err != nil {
-		return nil, err
-	}
-	if len(eps) > 0 {
-		ep := eps[0]
-		return &TmdbToTvdbResult{
-			InputTMDBSeriesID: tmdbSeriesID,
-			InputSeason:       season,
-			InputEpisode:      episode,
-			TVDBSeriesID:      tvdbSeries.ID,
-			TVDBEpisodeID:     ep.ID,
-			TVDBSeason:        ep.SeasonNumber,
-			TVDBEpisode:       ep.Number,
-			TVDBEpisodeName:   ep.Name,
-			MatchedBy:         "season_episode_fallback",
-			TVDBSeriesLookup:  lookupUsed,
-		}, nil
+	// Coordinate identity is an assumption, not a match: it asserts that both
+	// schemes number this episode the same way, which is false exactly where the
+	// mapper is needed (TMDB Futurama S6E1 is "Bender's Big Score (1)" while TVDB
+	// default S6E1 is "Rebirth"). It is therefore opt-in, and when opted into it
+	// is labelled as an assumption so no caller can mistake it for evidence.
+	if m.allowCoordinateIdentityFallback {
+		s, e := season, episode
+		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, m.tvdbSeasonType, 0, &s, &e, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(eps) > 0 {
+			ep := eps[0]
+			return &TmdbToTvdbResult{
+				InputTMDBSeriesID: tmdbSeriesID,
+				InputSeason:       season,
+				InputEpisode:      episode,
+				TVDBSeriesID:      tvdbSeries.ID,
+				TVDBEpisodeID:     ep.ID,
+				TVDBSeason:        ep.SeasonNumber,
+				TVDBEpisode:       ep.Number,
+				TVDBEpisodeName:   ep.Name,
+				MatchedBy:         "assumed_same_coordinates",
+				TVDBSeriesLookup:  lookupUsed,
+			}, nil
+		}
 	}
 
-	return nil, fmt.Errorf("unable to map tmdb %d s%de%d to tvdb", tmdbSeriesID, season, episode)
+	return nil, fmt.Errorf("unable to map tmdb %d s%de%d to tvdb: no tvdb episode matched by "+
+		"air date or name in the %q order (coordinate identity is not assumed; "+
+		"set AllowCoordinateIdentityFallback to opt in)", tmdbSeriesID, season, episode, m.tvdbSeasonType)
 }
 
 type TvdbToTmdbResult struct {
