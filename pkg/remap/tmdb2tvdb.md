@@ -139,6 +139,26 @@ One Piece returns exactly one episode for `airDate=2024-01-07`, and that episode
 | TMDB 30984 Bleach S2E9 | The 2005 episode is *not* leaked onto 2022 coordinates |
 | One Piece 1242 episodes | Pages beyond the first are read |
 
+## Title comparison, and why it is exported
+
+`TitlesMatch` compares episode titles and tolerates the series-name prefix TVDB
+puts on specials: `Futurama: Bender's Big Score` matches `Bender's Big Score`.
+The rule is narrow by construction -- it only retries with a `Prefix:` segment
+removed when a colon is actually present, so ordinary titles still require an
+exact match and `The End` does not match `The Beginning of the End`.
+
+It is **exported** deliberately. The API repo's backlog migration has to label
+stored rows using the same comparison; a migration running plain equality would
+fail on exactly the specials this rule was written for and would leave them
+unlabelled. Anywhere a TVDB title meets a TMDB title, use this function rather
+than `==`.
+
+Why it matters at all: skipping the prefix costs a correct answer. TVDB S0E2 is
+`Futurama: Bender's Big Score`; without the prefix rule the name match misses,
+the weaker `air_date+number` rule takes over, and because TVDB and TMDB number
+the specials differently (TVDB S0E2 is the first film, TMDB S0E1 is) it answers
+**`Everybody Loves Hypnotoad`** -- a different special on the same air date.
+
 ## Known limits
 
 - **Localized titles.** TVDB names anime in Japanese (One Piece S1E1 is

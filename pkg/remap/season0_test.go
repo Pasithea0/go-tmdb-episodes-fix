@@ -177,8 +177,8 @@ func TestTitlesMatch(t *testing.T) {
 		{"A", "B", false},
 	}
 	for _, c := range cases {
-		if got := titlesMatch(c.want, c.got); got != c.expect {
-			t.Fatalf("titlesMatch(%q, %q) = %v, want %v", c.want, c.got, got, c.expect)
+		if got := TitlesMatch(c.want, c.got); got != c.expect {
+			t.Fatalf("TitlesMatch(%q, %q) = %v, want %v", c.want, c.got, got, c.expect)
 		}
 	}
 }

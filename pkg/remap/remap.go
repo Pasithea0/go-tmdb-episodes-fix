@@ -891,7 +891,7 @@ func lookupInGroupBucket(bucket tmdb.EpisodeGroupOrder, tvdbEp tvdb.EpisodeBaseR
 func matchSeasonEpisode(tvdbEp tvdb.EpisodeBaseRecord, seasonEps []tmdb.SeasonEpisode) (epNum int, epID int, matchedBy string) {
 	// 1) Name match — the strongest signal.
 	for _, ep := range seasonEps {
-		if strings.TrimSpace(tvdbEp.Name) != "" && titlesMatch(tvdbEp.Name, ep.Name) {
+		if strings.TrimSpace(tvdbEp.Name) != "" && TitlesMatch(tvdbEp.Name, ep.Name) {
 			return ep.EpisodeNumber, ep.ID, "name_scan"
 		}
 	}
@@ -924,7 +924,12 @@ func matchSeasonEpisode(tvdbEp tvdb.EpisodeBaseRecord, seasonEps []tmdb.SeasonEp
 // S0E2 is the first film, TMDB S0E1 is), so the number rule answers
 // "Everybody Loves Hypnotoad" -- a different special sharing the same air date.
 // A wrong episode with no error is worse than no answer.
-func titlesMatch(want, got string) bool {
+//
+// Exported because the API repo's backlog migration must compare titles by this
+// same rule: TVDB's specials carry the series prefix in storage too, so a
+// migration using a plain equality check would fail to label them and would
+// leave the very episodes this rule exists to place.
+func TitlesMatch(want, got string) bool {
 	if normalizeName(want) == normalizeName(got) {
 		return true
 	}
