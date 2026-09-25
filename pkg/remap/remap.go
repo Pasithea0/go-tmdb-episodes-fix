@@ -773,7 +773,27 @@ func (m *Mapper) scanTMDBSeasons(ctx context.Context, tmdbSeriesID int, tvdbEp t
 		limit = m.maxTMDBSeasons
 	}
 
-	for seasonNum := 1; seasonNum <= limit; seasonNum++ {
+	// TMDB keeps specials in season 0, so a scan that starts at season 1 can
+	// never place a TVDB special: its TMDB counterpart is in a season the loop
+	// does not visit, and the episode fails with "unable to map" however well
+	// the name and air date line up.
+	//
+	// The order is chosen so this stays additive. A TVDB special looks in TMDB
+	// season 0 first, so a same-named episode in a regular season cannot capture
+	// it; every other episode looks in season 0 last, so season 0 can only turn
+	// a previous failure into a match and never changes an existing one.
+	seasons := make([]int, 0, limit+1)
+	if tvdbEp.SeasonNumber == 0 {
+		seasons = append(seasons, 0)
+	}
+	for seasonNumber := 1; seasonNumber <= limit; seasonNumber++ {
+		seasons = append(seasons, seasonNumber)
+	}
+	if tvdbEp.SeasonNumber != 0 {
+		seasons = append(seasons, 0)
+	}
+
+	for _, seasonNum := range seasons {
 		seasonEps, err := m.tmdb.GetSeasonEpisodes(ctx, tmdbSeriesID, seasonNum)
 		if err != nil {
 			continue
@@ -865,9 +885,9 @@ func lookupInGroupBucket(bucket tmdb.EpisodeGroupOrder, tvdbEp tvdb.EpisodeBaseR
 //  3. bare air date — fallback for orderings that genuinely differ from TMDB
 //     (reordered episodes where numbers don't align).
 func matchSeasonEpisode(tvdbEp tvdb.EpisodeBaseRecord, seasonEps []tmdb.SeasonEpisode) (epNum int, epID int, matchedBy string) {
-	// 1) Exact name match — the strongest signal.
+	// 1) Name match — the strongest signal.
 	for _, ep := range seasonEps {
-		if strings.TrimSpace(tvdbEp.Name) != "" && normalizeName(tvdbEp.Name) == normalizeName(ep.Name) {
+		if strings.TrimSpace(tvdbEp.Name) != "" && titlesMatch(tvdbEp.Name, ep.Name) {
 			return ep.EpisodeNumber, ep.ID, "name_scan"
 		}
 	}
@@ -888,6 +908,39 @@ func matchSeasonEpisode(tvdbEp tvdb.EpisodeBaseRecord, seasonEps []tmdb.SeasonEp
 		}
 	}
 	return 0, 0, ""
+}
+
+// titlesMatch compares two episode titles, tolerating the series-name prefix
+// TVDB puts on specials.
+//
+// TVDB calls the Futurama films "Futurama: Bender's Big Score" where TMDB says
+// "Bender's Big Score", so an exact comparison misses an episode that is plainly
+// the same one. Missing it is not harmless: the next rule down is
+// air_date+number, and TMDB numbers the specials differently from TVDB (TVDB
+// S0E2 is the first film, TMDB S0E1 is), so the number rule answers
+// "Everybody Loves Hypnotoad" -- a different special sharing the same air date.
+// A wrong episode with no error is worse than no answer.
+func titlesMatch(want, got string) bool {
+	if normalizeName(want) == normalizeName(got) {
+		return true
+	}
+
+	// Retry with a "Prefix:" segment removed, but only when the colon is
+	// actually there -- an exact comparison stays the rule for ordinary titles,
+	// so this cannot turn "The End" into a match for "The Beginning of the End".
+	wantStripped, gotStripped := stripTitlePrefix(want), stripTitlePrefix(got)
+	if wantStripped == want && gotStripped == got {
+		return false
+	}
+	return normalizeName(wantStripped) == normalizeName(gotStripped)
+}
+
+// stripTitlePrefix removes a leading "Something: " segment from a title.
+func stripTitlePrefix(title string) string {
+	if idx := strings.Index(title, ":"); idx > 0 && idx < len(title)-1 {
+		return strings.TrimSpace(title[idx+1:])
+	}
+	return title
 }
 
 // datesWithinOneDay reports whether two YYYY-MM-DD dates are the same day or

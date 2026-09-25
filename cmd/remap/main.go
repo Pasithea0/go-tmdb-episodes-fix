@@ -25,7 +25,7 @@ func main() {
 		tmdbID      = flag.Int("tmdb-id", 0, "TMDB series id")
 		tvdbID      = flag.Int("tvdb-id", 0, "TVDB series id")
 		imdbID      = flag.String("imdb-id", "", "IMDb series id (e.g. tt0434665)")
-		season      = flag.Int("season", 0, "season number")
+		season      = flag.Int("season", -1, "season number (0 = specials)")
 		episode     = flag.Int("episode", 0, "episode number")
 		tvdbKey     = flag.String("tvdb-key", getenv("TVDB_API_KEY"), "TVDB API key (or TVDB_API_KEY env var)")
 		tvdbPin     = flag.String("tvdb-pin", getenv("TVDB_PIN"), "TVDB subscriber pin (or TVDB_PIN env var)")
@@ -60,8 +60,11 @@ func main() {
 		return
 	}
 
-	if *season <= 0 || *episode <= 0 {
-		exitErr("season and episode are required and must be > 0")
+	// Season 0 is legitimate -- TMDB and TVDB both keep specials there, and the
+	// season scan reaches season 0 for exactly that case -- so only "unset" is an
+	// error. That is why the flag defaults to -1 rather than 0.
+	if *season < 0 || *episode <= 0 {
+		exitErr("season (0 or greater) and episode (1 or greater) are required")
 	}
 
 	hints := remap.EpisodeHints{
@@ -76,7 +79,7 @@ func main() {
 		if *tmdbID == 0 {
 			exitErr("tmdb-id is required for tmdb2tvdb")
 		}
-		res, err := mapper.TmdbToTvdb(ctx, *tmdbID, *season, *episode)
+		res, err := mapper.TmdbToTvdbWithHints(ctx, *tmdbID, *season, *episode, hints)
 		if err != nil {
 			exitErr(err.Error())
 		}

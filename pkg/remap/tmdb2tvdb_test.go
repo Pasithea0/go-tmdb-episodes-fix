@@ -131,6 +131,8 @@ type fakeTMDB struct {
 	details map[string]*tmdb.EpisodeDetails // key "series/season/episode"
 	names   map[int]string                  // series id -> series name
 	tvdbID  map[int]int                     // external_ids route
+	// seasons backs GetSeasonEpisodes, keyed "series/season".
+	seasons map[string][]tmdb.SeasonEpisode
 }
 
 func (f *fakeTMDB) GetEpisodeDetails(_ context.Context, tvID, season, episode int) (*tmdb.EpisodeDetails, error) {
@@ -164,8 +166,13 @@ func (f *fakeTMDB) GetEpisodeGroups(context.Context, int) ([]tmdb.EpisodeGroup, 
 func (f *fakeTMDB) GetEpisodeGroup(context.Context, string) (*tmdb.EpisodeGroupDetail, error) {
 	return nil, nil
 }
-func (f *fakeTMDB) GetSeasonEpisodes(context.Context, int, int) ([]tmdb.SeasonEpisode, error) {
-	return nil, nil
+func (f *fakeTMDB) GetSeasonEpisodes(_ context.Context, tvID int, season int) ([]tmdb.SeasonEpisode, error) {
+	if eps, ok := f.seasons[fmt.Sprintf("%d/%d", tvID, season)]; ok {
+		return eps, nil
+	}
+	// A season with no entry is absent, not empty: the real client 404s, and the
+	// scan treats that as "skip this season".
+	return nil, fmt.Errorf("no tmdb season %d for series %d", season, tvID)
 }
 
 // --- the Futurama fixture (real values) -------------------------------------
