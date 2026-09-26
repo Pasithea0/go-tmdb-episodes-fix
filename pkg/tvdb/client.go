@@ -203,6 +203,53 @@ type EpisodeExtendedRecord struct {
 
 type SearchByRemoteIdResult struct {
 	Series *SeriesBaseRecord `json:"series"`
+	// Movie is populated for movie remote ids. TVDB tags each result with the kind
+	// it is, so a caller must select the key it wants rather than take the first
+	// entry: one lookup can return a movie and a series at once, because TMDB ids
+	// are unique per namespace but a film and a TV show can share the same number.
+	Movie *MovieBaseRecord `json:"movie"`
+}
+
+type MovieBaseRecord struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Year    string `json:"year"`
+	Slug    string `json:"slug"`
+	Runtime int    `json:"runtime"`
+}
+
+type MovieExtendedRecord struct {
+	ID        int        `json:"id"`
+	Name      string     `json:"name"`
+	Year      string     `json:"year"`
+	Slug      string     `json:"slug"`
+	Runtime   int        `json:"runtime"`
+	RemoteIDs []RemoteID `json:"remoteIds"`
+}
+
+// TmdbID returns the movie's TMDB id from its remote ids, reporting whether one is
+// present. TVDB lists it as "TheMovieDB.com"; the check is case-insensitive and
+// ignores the separators TVDB varies between records.
+//
+// The reverse direction is not symmetric: this reads the id TVDB stores, whereas
+// finding a video by TMDB id needs the remote-id search (see FindMovieByTMDBID).
+func (m *MovieExtendedRecord) TmdbID() (int, bool) {
+	if m == nil {
+		return 0, false
+	}
+	for _, rid := range m.RemoteIDs {
+		source := strings.ToLower(strings.TrimSpace(rid.SourceName))
+		source = strings.NewReplacer(" ", "", ".", "", "-", "", "_", "").Replace(source)
+		if source != "themoviedbcom" && source != "themoviedb" && source != "tmdb" {
+			continue
+		}
+		id, err := strconv.Atoi(strings.TrimSpace(rid.ID))
+		if err != nil || id <= 0 {
+			continue
+		}
+		return id, true
+	}
+	return 0, false
 }
 
 func (c *Client) SearchSeriesByRemoteID(ctx context.Context, remoteID string) (*SeriesBaseRecord, error) {
@@ -321,6 +368,102 @@ func (c *Client) GetEpisodeExtended(ctx context.Context, episodeID int64) (*Epis
 	}
 	if resp.Data.ID == 0 {
 		return nil, errors.New("tvdb episode extended returned empty data")
+	}
+	return &resp.Data, nil
+}
+
+// SearchMovieByRemoteID resolves a TVDB movie from a remote id (an IMDb id, a TMDB
+// id, ...). It returns nil, nil when the lookup contains no movie, which is a normal
+// outcome rather than an error: TVDB returns whatever kinds match, so a miss here
+// means "not on TVDB", and a caller must not treat that as a transport failure.
+//
+// Only the movie key is considered. The same remote id can match a series at the
+// same time, and taking the first entry would silently return a TV show for a film.
+func (c *Client) SearchMovieByRemoteID(ctx context.Context, remoteID string) (*MovieBaseRecord, error) {
+	if strings.TrimSpace(remoteID) == "" {
+		return nil, errors.New("remote id is required")
+	}
+
+	var resp struct {
+		Data   []SearchByRemoteIdResult `json:"data"`
+		Status string                   `json:"status"`
+	}
+
+	if err := c.do(ctx, http.MethodGet, "/search/remoteid/"+url.PathEscape(remoteID), nil, nil, &resp); err != nil {
+		return nil, err
+	}
+
+	for _, item := range resp.Data {
+		if item.Movie != nil && item.Movie.ID != 0 {
+			return item.Movie, nil
+		}
+	}
+	return nil, nil
+}
+
+// FindMovieByIMDbID resolves a TVDB movie from an IMDb id (e.g. "tt0133093").
+func (c *Client) FindMovieByIMDbID(ctx context.Context, imdbID string) (*MovieBaseRecord, string, error) {
+	imdbID = strings.TrimSpace(imdbID)
+	if imdbID == "" {
+		return nil, "", errors.New("imdb id is required")
+	}
+
+	for _, candidate := range []string{imdbID, "imdb-" + imdbID, "imdb:" + imdbID} {
+		m, err := c.SearchMovieByRemoteID(ctx, candidate)
+		if err != nil {
+			return nil, "", err
+		}
+		if m != nil {
+			return m, candidate, nil
+		}
+	}
+	return nil, "", nil
+}
+
+// FindMovieByTMDBID resolves a TVDB movie from a TMDB movie id.
+//
+// This is the only safe way to go from a TMDB id to a film on TVDB, and the reason
+// is not obvious: /movies/{id} takes a TVDB id, and TVDB movie ids are a different
+// namespace that overlaps TMDB's numerically. Passing a TMDB id to /movies/{id} does
+// not fail -- it returns a real, different film (TMDB 603 is The Matrix, while TVDB
+// movie 603 is Zombieland), so a mistake there is silent and looks like success.
+func (c *Client) FindMovieByTMDBID(ctx context.Context, tmdbID int) (*MovieBaseRecord, string, error) {
+	if tmdbID <= 0 {
+		return nil, "", errors.New("tmdb id must be positive")
+	}
+
+	id := strconv.Itoa(tmdbID)
+	for _, candidate := range []string{id, "tmdb-" + id, "tmdb:" + id, "themoviedb-" + id, "themoviedb:" + id} {
+		m, err := c.SearchMovieByRemoteID(ctx, candidate)
+		if err != nil {
+			return nil, "", err
+		}
+		if m != nil {
+			return m, candidate, nil
+		}
+	}
+	return nil, "", nil
+}
+
+// GetMovieExtended fetches a movie's extended record.
+//
+// movieID is a TVDB movie id, never a TMDB one. See FindMovieByTMDBID: the two id
+// spaces overlap numerically, so a TMDB id here returns a different film rather than
+// an error, and the only symptom is wrong metadata.
+func (c *Client) GetMovieExtended(ctx context.Context, movieID int) (*MovieExtendedRecord, error) {
+	if movieID <= 0 {
+		return nil, errors.New("tvdb movie id must be positive")
+	}
+
+	var resp struct {
+		Data   MovieExtendedRecord `json:"data"`
+		Status string              `json:"status"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/movies/"+strconv.Itoa(movieID)+"/extended", nil, nil, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Data.ID == 0 {
+		return nil, errors.New("tvdb movie extended returned empty data")
 	}
 	return &resp.Data, nil
 }
