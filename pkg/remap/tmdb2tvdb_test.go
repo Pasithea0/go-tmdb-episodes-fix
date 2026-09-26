@@ -20,7 +20,7 @@ import (
 //	  S6E1 id 35077  "Rebirth"                2010-06-24
 //	  S7E1 id 35107  "The Bots and the Bees"  2012-06-20
 //	TVDB 73871 "default"
-//	  s1e1 id 1001     "Space Pilot 3000"       1999-03-28
+//	  s1e1 id 131174   "Space Pilot 3000"       1999-03-28
 //	  s6e1 id 1051911  "Rebirth"                2010-06-24
 //	  s7e1 id 4319164  "The Bots and the Bees"  2012-06-20
 //	TVDB 73871 "alternate"
@@ -60,6 +60,15 @@ type fakeTVDB struct {
 	episodeRemoteIDs map[int64][]tvdb.RemoteID
 
 	lookupUsed string
+
+	// forbidAirDateFilter makes any use of TVDB's server-side airDate query
+	// parameter fail loudly. That parameter is unreliable and must never decide
+	// an episode -- measured live 2026-09-25 on Futurama (73871, order=default):
+	// airDate=2007-11-27 returned ONE of the two episodes that aired that day,
+	// airDate=2008-06-30 returned NONE though s0e3 aired exactly then, and
+	// airDate=2008-06-24 returned s0e3 (aired 2008-06-30) anyway. Candidates must
+	// be computed locally from a complete list instead.
+	forbidAirDateFilter bool
 }
 
 func (f *fakeTVDB) SearchSeriesByRemoteID(_ context.Context, remoteID string) (*tvdb.SeriesBaseRecord, error) {
@@ -119,6 +128,11 @@ func (f *fakeTVDB) GetSeriesEpisodes(
 	if !ok {
 		return nil, fmt.Errorf("no episodes for tvdb series %d", seriesID)
 	}
+	if airDate != nil && f.forbidAirDateFilter {
+		return nil, fmt.Errorf(
+			"GetSeriesEpisodes called with an airDate filter (%q): TVDB's airDate parameter is unreliable and must not be used to decide an episode",
+			*airDate)
+	}
 	all := orders[seasonType]
 
 	var filtered []tvdb.EpisodeBaseRecord
@@ -155,6 +169,10 @@ type fakeTMDB struct {
 	seasons map[string][]tmdb.SeasonEpisode
 	// episodesByID backs GetEpisodeByID.
 	episodesByID map[int]*tmdb.EpisodeByID
+	// episodeExternalIDs backs GetEpisodeExternalIDs, keyed "series/season/episode".
+	// Values are the real ones TMDB reports (measured 2026-09-25) and each has
+	// been confirmed against TVDB's own /episodes/{id}/extended.
+	episodeExternalIDs map[string]*tmdb.EpisodeExternalIDs
 }
 
 func (f *fakeTMDB) GetEpisodeDetails(_ context.Context, tvID, season, episode int) (*tmdb.EpisodeDetails, error) {
@@ -166,6 +184,18 @@ func (f *fakeTMDB) GetEpisodeDetails(_ context.Context, tvID, season, episode in
 
 // GetEpisodeByID models TMDB 404ing on an episode id that no longer exists,
 // which is what TVDB's stale remote ids for the Futurama specials hit.
+// GetEpisodeExternalIDs returns TMDB's cross-reference for an episode. An
+// episode with no entry returns an EMPTY result and a nil error, not an error:
+// TMDB genuinely does not carry a TVDB link for every episode, and the mapper is
+// required to fall back to air date and name rather than to fail. Modelling this
+// as "no link" rather than "not found" is what exercises that fallback.
+func (f *fakeTMDB) GetEpisodeExternalIDs(_ context.Context, tvID, season, episode int) (*tmdb.EpisodeExternalIDs, error) {
+	if ext, ok := f.episodeExternalIDs[fmt.Sprintf("%d/%d/%d", tvID, season, episode)]; ok {
+		return ext, nil
+	}
+	return &tmdb.EpisodeExternalIDs{}, nil
+}
+
 func (f *fakeTMDB) GetEpisodeByID(_ context.Context, episodeID int) (*tmdb.EpisodeByID, error) {
 	if ep, ok := f.episodesByID[episodeID]; ok {
 		return ep, nil
@@ -221,7 +251,7 @@ func futuramaTVDB() *fakeTVDB {
 		episodes: map[int]map[string][]tvdb.EpisodeBaseRecord{
 			73871: {
 				"default": {
-					{ID: 1001, Name: "Space Pilot 3000", Aired: "1999-03-28", SeriesID: 73871, SeasonNumber: 1, Number: 1},
+					{ID: 131174, Name: "Space Pilot 3000", Aired: "1999-03-28", SeriesID: 73871, SeasonNumber: 1, Number: 1},
 					{ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeriesID: 73871, SeasonNumber: 6, Number: 1},
 					{ID: 4319164, Name: "The Bots and the Bees", Aired: "2012-06-20", SeriesID: 73871, SeasonNumber: 7, Number: 1},
 					// Season 0 (specials), as TVDB 73871 "default" really lists them,
@@ -240,14 +270,19 @@ func futuramaTVDB() *fakeTVDB {
 			},
 		},
 		episodesByID: map[int64]tvdb.EpisodeBaseRecord{
-			389457:  {ID: 389457, Name: "Everybody Loves Hypnotoad", Aired: "2007-11-27", SeasonNumber: 0, Number: 1},
-			342888:  {ID: 342888, Name: "Futurama: Bender's Big Score", Aired: "2007-11-27", SeasonNumber: 0, Number: 2},
-			359477:  {ID: 359477, Name: "Futurama: The Beast with a Billion Backs", Aired: "2008-06-30", SeasonNumber: 0, Number: 3},
-			372786:  {ID: 372786, Name: "Futurama: The Lost Adventure", Aired: "2008-06-24", SeasonNumber: 0, Number: 4},
-			395236:  {ID: 395236, Name: "Futurama: Bender's Game", Aired: "2008-11-03", SeasonNumber: 0, Number: 5},
-			427447:  {ID: 427447, Name: "Futurama: Into the Wild Green Yonder", Aired: "2009-02-24", SeasonNumber: 0, Number: 6},
-			1051911: {ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeasonNumber: 6, Number: 1},
-			8234611: {ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeasonNumber: 6, Number: 1},
+			// SeriesID matters: the TMDB->TVDB exact path verifies that the episode
+			// TMDB points at belongs to the series it just resolved, so an entry
+			// without SeriesID silently disables that path and hides regressions.
+			131174:  {ID: 131174, Name: "Space Pilot 3000", Aired: "1999-03-28", SeriesID: 73871, SeasonNumber: 1, Number: 1},
+			389457:  {ID: 389457, Name: "Everybody Loves Hypnotoad", Aired: "2007-11-27", SeriesID: 73871, SeasonNumber: 0, Number: 1},
+			342888:  {ID: 342888, Name: "Futurama: Bender's Big Score", Aired: "2007-11-27", SeriesID: 73871, SeasonNumber: 0, Number: 2},
+			359477:  {ID: 359477, Name: "Futurama: The Beast with a Billion Backs", Aired: "2008-06-30", SeriesID: 73871, SeasonNumber: 0, Number: 3},
+			372786:  {ID: 372786, Name: "Futurama: The Lost Adventure", Aired: "2008-06-24", SeriesID: 73871, SeasonNumber: 0, Number: 4},
+			395236:  {ID: 395236, Name: "Futurama: Bender's Game", Aired: "2008-11-03", SeriesID: 73871, SeasonNumber: 0, Number: 5},
+			427447:  {ID: 427447, Name: "Futurama: Into the Wild Green Yonder", Aired: "2009-02-24", SeriesID: 73871, SeasonNumber: 0, Number: 6},
+			1051911: {ID: 1051911, Name: "Rebirth", Aired: "2010-06-24", SeriesID: 73871, SeasonNumber: 6, Number: 1},
+			4319164: {ID: 4319164, Name: "The Bots and the Bees", Aired: "2012-06-20", SeriesID: 73871, SeasonNumber: 7, Number: 1},
+			8234611: {ID: 8234611, Name: "Bender's Big Score (1)", Aired: "2008-03-23", SeriesID: 73871, SeasonNumber: 6, Number: 1},
 		},
 		// Series-level remote id, as TVDB really carries it.
 		seriesRemoteIDs: map[int][]tvdb.RemoteID{
@@ -270,10 +305,37 @@ func futuramaTMDB() *fakeTMDB {
 			"615/1/1": {ID: 35076, Name: "Space Pilot 3000", AirDate: "1999-03-28", SeasonNumber: 1, EpisodeNumber: 1},
 			"615/6/1": {ID: 35077, Name: "Rebirth", AirDate: "2010-06-24", SeasonNumber: 6, EpisodeNumber: 1},
 			"615/7/1": {ID: 35107, Name: "The Bots and the Bees", AirDate: "2012-06-20", SeasonNumber: 7, EpisodeNumber: 1},
+
+			// Season 0, exactly as TMDB reports it (measured 2026-09-25). TMDB and
+			// TVDB `default` SWAP s0e1/s0e2, and both air 2007-11-27 -- this is the
+			// collision that produced the wrong-episode bug.
+			"615/0/1": {ID: 35101, Name: "Bender's Big Score", AirDate: "2007-11-27", SeasonNumber: 0, EpisodeNumber: 1},
+			"615/0/2": {ID: 35103, Name: "Everybody Loves Hypnotoad", AirDate: "2007-11-27", SeasonNumber: 0, EpisodeNumber: 2},
+			"615/0/5": {ID: 35105, Name: "Bender's Game", AirDate: "2008-11-04", SeasonNumber: 0, EpisodeNumber: 5},
+		},
+		// The real TMDB cross-references, each confirmed against TVDB's own
+		// /episodes/{id}/extended rather than trusted from TMDB alone.
+		episodeExternalIDs: map[string]*tmdb.EpisodeExternalIDs{
+			"615/0/1": {IMDbID: "tt0471711", TVDBID: 342888},  // TVDB default s0e2 Bender's Big Score
+			"615/0/2": {IMDbID: "tt1151330", TVDBID: 389457},  // TVDB default s0e1 Everybody Loves Hypnotoad
+			"615/0/5": {IMDbID: "tt1054486", TVDBID: 395236},  // TVDB default s0e5 Bender's Game
+			"615/1/1": {IMDbID: "tt0584449", TVDBID: 131174},  // TVDB default s1e1 Space Pilot 3000
+			"615/6/1": {IMDbID: "tt1620650", TVDBID: 1051911}, // TVDB default s6e1 Rebirth
+			"615/7/1": {IMDbID: "tt1952190", TVDBID: 4319164}, // TVDB default s7e1 The Bots and the Bees
 		},
 		names:  map[int]string{615: "Futurama"},
 		tvdbID: map[int]int{615: 73871},
 	}
+}
+
+// futuramaMapperWithoutEpisodeExternalIDs removes TMDB's episode cross-references,
+// leaving only air date and name as evidence -- the state every episode without a
+// TMDB->TVDB link is in.
+func futuramaMapperWithoutEpisodeExternalIDs(t *testing.T) *Mapper {
+	t.Helper()
+	m := futuramaMapper(t)
+	m.tmdb.(*fakeTMDB).episodeExternalIDs = nil
+	return m
 }
 
 func futuramaMapper(t *testing.T) *Mapper {
@@ -323,9 +385,13 @@ func TestTmdbToTvdbDoesNotReturnTheWrongEpisodeByNumbers(t *testing.T) {
 	}
 }
 
-// TestTmdbToTvdbMapsWhenEvidenceAgrees is the positive control.
+// TestTmdbToTvdbMapsWhenEvidenceAgrees is the positive control for the
+// evidence-based path. It removes the TMDB cross-reference on purpose: with an
+// exact id available the mapper takes the exact path instead (covered by
+// TestTmdbSeasonZeroResolvesTheFilmNotHypnotoad), and this test exists to pin
+// that air date and name still work when there is no id to lean on.
 func TestTmdbToTvdbMapsWhenEvidenceAgrees(t *testing.T) {
-	m := futuramaMapper(t)
+	m := futuramaMapperWithoutEpisodeExternalIDs(t)
 
 	got, err := m.TmdbToTvdb(context.Background(), 615, 1, 1)
 	if err != nil {

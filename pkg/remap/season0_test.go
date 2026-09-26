@@ -84,7 +84,7 @@ func TestScanTMDBSeasonsStillFindsRegularSeasons(t *testing.T) {
 	m := seasonZeroMapper()
 
 	tvdbEp := tvdb.EpisodeBaseRecord{
-		ID: 1001, Name: "Space Pilot 3000",
+		ID: 131174, Name: "Space Pilot 3000",
 		Aired: "1999-03-28", SeriesID: 73871, SeasonNumber: 1, Number: 1,
 	}
 

@@ -113,6 +113,44 @@ func (c *Client) GetEpisodeDetails(ctx context.Context, tvID int, season int, ep
 	}, nil
 }
 
+// EpisodeExternalIDs is TMDB's own cross-reference table for a single episode.
+//
+// TVDBID is the load-bearing field: it is the TVDB episode id for the DEFAULT
+// order, which turns "which TVDB episode is TMDB s0e1?" from an air-date/name
+// guess into an exact lookup.
+//
+// Verified live 2026-09-25 against Futurama (TMDB 615):
+//
+//	TMDB s0e1 Bender's Big Score      -> 342888 = TVDB default s0e2
+//	TMDB s0e2 Everybody Loves Hypnotoad -> 389457 = TVDB default s0e1
+//	TMDB s6e1 Rebirth                 -> 1051911 = TVDB default s6e1
+//
+// The first two are exactly the pair that evidence-based matching gets wrong:
+// TMDB and TVDB default SWAP s0e1/s0e2 and both air 2007-11-27, so an air-date
+// tie exists and TVDB's own airDate filter does not even return both of them.
+type EpisodeExternalIDs struct {
+	IMDbID string
+	TVDBID int
+}
+
+// GetEpisodeExternalIDs reads /tv/{id}/season/{s}/episode/{e}/external_ids.
+//
+// A zero TVDBID is returned with a nil error, not as an error: TMDB does not
+// carry a TVDB link for every episode, and callers must fall back to air date
+// and name. Keeping "no link exists" distinct from "the request failed" is what
+// lets the caller decide whether to fall through or to fail.
+func (c *Client) GetEpisodeExternalIDs(ctx context.Context, tvID int, season int, episode int) (*EpisodeExternalIDs, error) {
+	path := fmt.Sprintf("/tv/%d/season/%d/episode/%d/external_ids", tvID, season, episode)
+	var resp struct {
+		IMDbID string `json:"imdb_id"`
+		TVDBID int    `json:"tvdb_id"`
+	}
+	if err := c.doGet(ctx, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &EpisodeExternalIDs{IMDbID: resp.IMDbID, TVDBID: resp.TVDBID}, nil
+}
+
 type EpisodeByID struct {
 	ID            int
 	Name          string

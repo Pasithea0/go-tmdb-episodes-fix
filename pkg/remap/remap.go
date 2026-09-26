@@ -46,6 +46,7 @@ type tvdbAPI interface {
 // tmdbAPI is the slice of the TMDB client the mapper depends on.
 type tmdbAPI interface {
 	GetEpisodeDetails(ctx context.Context, tvID int, season int, episode int) (*tmdb.EpisodeDetails, error)
+	GetEpisodeExternalIDs(ctx context.Context, tvID int, season int, episode int) (*tmdb.EpisodeExternalIDs, error)
 	GetEpisodeByID(ctx context.Context, episodeID int) (*tmdb.EpisodeByID, error)
 	GetTVDetails(ctx context.Context, tvID int) (*tmdb.TVDetails, error)
 	GetTvdbIDFromTmdbID(ctx context.Context, tvID int) (int, error)
@@ -169,20 +170,73 @@ func (m *Mapper) TmdbToTvdbInOrder(ctx context.Context, tmdbSeriesID int, season
 		return nil, err
 	}
 
+	// 0. TMDB's own cross-reference is exact and needs no heuristics. TMDB records
+	//    the TVDB episode id for many episodes, and that id is a DEFAULT-order
+	//    record.
+	//
+	//    Verified live 2026-09-25 (Futurama, TMDB 615): s0e1 Bender's Big Score ->
+	//    342888 = TVDB default s0e2, and s0e2 Everybody Loves Hypnotoad -> 389457 =
+	//    default s0e1. Those two are precisely the pair that evidence-based
+	//    matching gets WRONG -- TMDB and TVDB default swap s0e1/s0e2 and both air
+	//    2007-11-27 -- so this is the only path that resolves them exactly.
+	//
+	//    Default only: the id is a default-order record and does not appear in
+	//    other orders' lists (TVDB alternate s0e2 is 11871359, not 342888), so a
+	//    different order falls through to the evidence below rather than being
+	//    handed coordinates that belong to another order.
+	//
+	//    Failures here are deliberately non-fatal: a missing or 404ing
+	//    external_ids link is not an error, it just means this shortcut is
+	//    unavailable. Falling through to real evidence is not a guess.
+	if normalizedOrder == "default" {
+		if ext, extErr := m.tmdb.GetEpisodeExternalIDs(ctx, tmdbSeriesID, season, episode); extErr == nil && ext != nil && ext.TVDBID != 0 {
+			if byID, idErr := m.tvdb.GetEpisodeExtended(ctx, int64(ext.TVDBID)); idErr == nil && byID != nil && byID.SeriesID == tvdbSeries.ID {
+				return &TmdbToTvdbResult{
+					InputTMDBSeriesID: tmdbSeriesID,
+					InputSeason:       season,
+					InputEpisode:      episode,
+					TVDBSeriesID:      tvdbSeries.ID,
+					TVDBEpisodeID:     byID.ID,
+					TVDBSeason:        byID.SeasonNumber,
+					TVDBEpisode:       byID.Number,
+					TVDBEpisodeName:   byID.Name,
+					MatchedBy:         "tmdb_episode_tvdb_id",
+					TVDBSeriesLookup:  lookupUsed,
+				}, nil
+			}
+		}
+	}
+
 	if strings.TrimSpace(tmdbEp.AirDate) != "" {
-		airDate := tmdbEp.AirDate
-		// Safe to read a single page here: the airDate filter is applied by TVDB,
-		// not by us. Verified live 2026-09-25 -- One Piece (1242 episodes, pages
-		// of 500) returns exactly the one episode for airDate=2024-01-07, which
-		// sits beyond page 0. If this ever stopped being server-side, page 0
-		// would return up to 500 episodes and the len(eps)==1 check below would
-		// quietly never match for long series.
-		eps, err := m.tvdb.GetSeriesEpisodes(ctx, tvdbSeries.ID, normalizedOrder, 0, nil, nil, &airDate)
+		// Candidates are computed LOCALLY from the complete order list. TVDB's own
+		// airDate query parameter is not a trustworthy filter and must not decide
+		// an episode. Measured live 2026-09-25 on Futurama (73871, order=default):
+		//
+		//	airDate=2007-11-27 -> 1 episode, but TWO aired that day (s0e1, s0e2)
+		//	airDate=2008-06-30 -> 0 episodes, though s0e3 aired exactly then
+		//	airDate=2008-06-24 -> returns s0e3 (aired 2008-06-30) as well as s0e4
+		//
+		// So it both misses matching episodes and returns non-matching ones. It
+		// happens to look correct when a date has exactly one episode, which is
+		// why the previous len(eps)==1 shortcut survived: it was reading a
+		// filtered list whose contents were never verified. Filtering a complete
+		// list compares the field itself instead of whatever TVDB means by the
+		// parameter.
+		all, err := m.fetchOrderEpisodes(ctx, tvdbSeries.ID, normalizedOrder)
 		if err != nil {
 			return nil, err
 		}
-		if len(eps) == 1 {
-			ep := eps[0]
+
+		var candidates []tvdb.EpisodeBaseRecord
+		for i := range all {
+			if strings.TrimSpace(all[i].Aired) == strings.TrimSpace(tmdbEp.AirDate) {
+				candidates = append(candidates, all[i])
+			}
+		}
+
+		switch {
+		case len(candidates) == 1:
+			ep := candidates[0]
 			return &TmdbToTvdbResult{
 				InputTMDBSeriesID: tmdbSeriesID,
 				InputSeason:       season,
@@ -195,24 +249,34 @@ func (m *Mapper) TmdbToTvdbInOrder(ctx context.Context, tmdbSeriesID int, season
 				MatchedBy:         "air_date",
 				TVDBSeriesLookup:  lookupUsed,
 			}, nil
-		}
 
-		if len(eps) > 1 {
-			best := pickBestByName(eps, tmdbEp.Name)
-			if best != nil {
-				return &TmdbToTvdbResult{
-					InputTMDBSeriesID: tmdbSeriesID,
-					InputSeason:       season,
-					InputEpisode:      episode,
-					TVDBSeriesID:      tvdbSeries.ID,
-					TVDBEpisodeID:     best.ID,
-					TVDBSeason:        best.SeasonNumber,
-					TVDBEpisode:       best.Number,
-					TVDBEpisodeName:   best.Name,
-					MatchedBy:         "air_date+name",
-					TVDBSeriesLookup:  lookupUsed,
-				}, nil
+		case len(candidates) > 1:
+			// A tie on air date is legitimate and common: Futurama default s0e1
+			// and s0e2 both aired 2007-11-27. The name breaks the tie. If it
+			// cannot, this is genuinely ambiguous, and picking the first
+			// candidate is exactly how the wrong episode reaches the library --
+			// it used to return s0e1 "Everybody Loves Hypnotoad" for TMDB s0e1
+			// "Bender's Big Score".
+			if strings.TrimSpace(tmdbEp.Name) != "" {
+				if best := pickBestByName(candidates, tmdbEp.Name); best != nil {
+					return &TmdbToTvdbResult{
+						InputTMDBSeriesID: tmdbSeriesID,
+						InputSeason:       season,
+						InputEpisode:      episode,
+						TVDBSeriesID:      tvdbSeries.ID,
+						TVDBEpisodeID:     best.ID,
+						TVDBSeason:        best.SeasonNumber,
+						TVDBEpisode:       best.Number,
+						TVDBEpisodeName:   best.Name,
+						MatchedBy:         "air_date+name",
+						TVDBSeriesLookup:  lookupUsed,
+					}, nil
+				}
 			}
+			return nil, fmt.Errorf(
+				"ambiguous tmdb %d s%de%d: %d episodes of tvdb series %d in the %q order aired %s (%s) and none matched the name %q",
+				tmdbSeriesID, season, episode, len(candidates), tvdbSeries.ID, normalizedOrder,
+				tmdbEp.AirDate, episodeNames(candidates), tmdbEp.Name)
 		}
 	}
 
@@ -964,6 +1028,16 @@ func datesWithinOneDay(a, b string) bool {
 	return d >= -24*time.Hour && d <= 24*time.Hour
 }
 
+// episodeNames renders candidate titles for an ambiguity error, so the message
+// names the episodes that collided instead of just their count.
+func episodeNames(eps []tvdb.EpisodeBaseRecord) string {
+	parts := make([]string, 0, len(eps))
+	for i := range eps {
+		parts = append(parts, fmt.Sprintf("s%de%d %q", eps[i].SeasonNumber, eps[i].Number, eps[i].Name))
+	}
+	return strings.Join(parts, "; ")
+}
+
 func pickBestByName(eps []tvdb.EpisodeBaseRecord, wantName string) *tvdb.EpisodeBaseRecord {
 	if len(eps) == 0 {
 		return nil
@@ -973,9 +1047,12 @@ func pickBestByName(eps []tvdb.EpisodeBaseRecord, wantName string) *tvdb.Episode
 		return &eps[0]
 	}
 
-	want := normalizeName(wantName)
+	// TitlesMatch, not normalized equality: TVDB prefixes specials with the series
+	// name ("Futurama: Bender's Game"), and plain equality rejects those. Measured:
+	// the name tiebreaker could never resolve the very specials it exists for,
+	// because "Bender's Game" != "Futurama: Bender's Game" under equality.
 	for i := range eps {
-		if want != "" && normalizeName(eps[i].Name) == want {
+		if TitlesMatch(wantName, eps[i].Name) {
 			return &eps[i]
 		}
 	}
@@ -1334,13 +1411,22 @@ func (m *Mapper) validateHints(hints EpisodeHints) (EpisodeHints, error) {
 // normalized names. A missing side is "unknown", never a mismatch: a caller that
 // cannot supply a name, or an episode with no upstream name, must not be treated
 // as disagreeing.
+// episodeNameMatch reports whether the caller's title agrees with the resolved
+// one. It must use TitlesMatch -- the same rule the matching logic uses -- or the
+// two disagree and the reported verdict is wrong.
+//
+// Measured before this change: submitting episode_name "Bender's Game" against
+// TVDB's "Futurama: Bender's Game" reported MISMATCH, because equality does not
+// see through TVDB's series-name prefix. A caller that got the right episode and
+// named it correctly was told it contradicted itself, which turns any policy of
+// "reject on mismatch" into a false rejection of correct submissions.
 func episodeNameMatch(want, got string) string {
 	w := normalizeName(want)
 	g := normalizeName(got)
 	if w == "" || g == "" {
 		return NameMatchUnknown
 	}
-	if w == g {
+	if TitlesMatch(want, got) {
 		return NameMatchMatch
 	}
 	return NameMatchMismatch
