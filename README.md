@@ -1,4 +1,4 @@
-# go-tmdb-episodes-fix
+# go-episode-remapper
 A go module to help remap TMDB to TVDB/IMDb episode order
 
 ## CLI
