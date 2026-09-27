@@ -20,6 +20,13 @@ TVDB → TMDB:
 go run ./cmd/remap -direction tvdb2tmdb -tvdb-id 456 -season 1 -episode 18
 ```
 
+TVDB → IMDb (derives the numbering IMDb uses for the episode — see
+[`pkg/remap/tvdb2imdb.md`](pkg/remap/tvdb2imdb.md) for how the order is chosen):
+
+```bash
+go run ./cmd/remap -direction tvdb2imdb -tvdb-id 73871 -season 0 -episode 2
+```
+
 IMDb → TMDB (resolves the TVDB series from the IMDb id; IMDb and TVDB usually
 share the same season/episode numbering, so the TVDB record's name + air date
 find the episode on TMDB even when TMDB's season structure differs):
@@ -65,6 +72,8 @@ spellings include the Jellyfin `Series.DisplayOrder` aliases `altdvd` and
   - (*Mapper).TmdbToTvdb(ctx, tmdbSeriesID, season, episode)
   - (*Mapper).TvdbToTmdb(ctx, tvdbSeriesID, season, episode)
   - (*Mapper).TvdbToTmdbWithHints(ctx, tvdbSeriesID, season, episode, remap.EpisodeHints{…})
+  - (*Mapper).TvdbToImdb(ctx, tvdbSeriesID, season, episode)
+  - (*Mapper).TvdbToImdbWithHints(ctx, tvdbSeriesID, season, episode, remap.EpisodeHints{…})
   - (*Mapper).ImdbToTmdb(ctx, imdbID, season, episode)
   - (*Mapper).ImdbToTmdbWithTMDB(ctx, imdbID, tmdbSeriesID, season, episode)
   - (*Mapper).ImdbToTmdbWithHints(ctx, imdbID, tmdbSeriesID /* 0 = resolve from TVDB */, season, episode, remap.EpisodeHints{…})

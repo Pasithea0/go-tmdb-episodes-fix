@@ -21,7 +21,7 @@ func main() {
 	loadDotEnv(".env")
 
 	var (
-		direction   = flag.String("direction", "tmdb2tvdb", "tmdb2tvdb, tvdb2tmdb, or imdb2tmdb")
+		direction   = flag.String("direction", "tmdb2tvdb", "tmdb2tvdb, tvdb2tmdb, tvdb2imdb, or imdb2tmdb")
 		tmdbID      = flag.Int("tmdb-id", 0, "TMDB series id")
 		tvdbID      = flag.Int("tvdb-id", 0, "TVDB series id")
 		imdbID      = flag.String("imdb-id", "", "IMDb series id (e.g. tt0434665)")
@@ -89,6 +89,15 @@ func main() {
 			exitErr("tvdb-id is required for tvdb2tmdb")
 		}
 		res, err := mapper.TvdbToTmdbWithHints(ctx, *tvdbID, *season, *episode, hints)
+		if err != nil {
+			exitErr(err.Error())
+		}
+		out = res
+	case "tvdb2imdb":
+		if *tvdbID == 0 {
+			exitErr("tvdb-id is required for tvdb2imdb")
+		}
+		res, err := mapper.TvdbToImdbWithHints(ctx, *tvdbID, *season, *episode, hints)
 		if err != nil {
 			exitErr(err.Error())
 		}
